@@ -9,6 +9,7 @@ class CRDR_Admin {
 	public static function init() {
 		add_action( 'admin_menu', array( __CLASS__, 'menu' ) );
 		add_action( 'admin_enqueue_scripts', array( __CLASS__, 'assets' ) );
+		add_action( 'admin_notices', array( 'CRDR_Health', 'admin_notices' ) );
 	}
 
 	public static function menu() {

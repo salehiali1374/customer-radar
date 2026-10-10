@@ -426,11 +426,13 @@ class CRDR_Playbooks {
 			'in_window' => $in_window,
 			'override'  => $gate['override'], // true = the sending hours were deliberately bypassed by that user.
 		);
-		$block = function ( $code, $message ) use ( &$res, &$entry ) {
+		$block = function ( $code, $message ) use ( &$res, &$entry, $id ) {
 			$res['error']   = $message;
 			$res['blocked'] = $code;
-			if ( 'manual' === $entry['trigger'] ) { // a refused click is worth keeping; a refused cron tick is not.
+			if ( 'manual' === $entry['trigger'] ) { // a refused click is worth keeping (the person also sees the answer).
 				CRDR_Send::log_run( $entry + array( 'result' => 'blocked:' . $code ) );
+			} else { // nobody watches cron: one state record per campaign (no log entry per tick), see CRDR_Health.
+				CRDR_Health::record_block( $id, $code );
 			}
 			return $res;
 		};
@@ -459,6 +461,9 @@ class CRDR_Playbooks {
 			'result' => 'ran',
 			'counts' => array_intersect_key( $res, array_flip( array( 'sent', 'held_out', 'skipped', 'failed', 'unknown' ) ) ),
 		) );
+		if ( 'cron' === $opts['trigger'] ) { // an executed run, as opposed to a blocked one.
+			CRDR_Health::record_run( $id, $res );
+		}
 		return $res;
 	}
 
@@ -567,6 +572,21 @@ class CRDR_Playbooks {
 
 	/** Runs inside WP-Cron every hour: auto playbooks send a small batch, only inside the allowed hours. */
 	public static function hourly() {
+		$all  = self::all();
+		$auto = array_keys( array_filter( $all, function ( $pb ) {
+			return 'auto' === $pb['mode'];
+		} ) );
+		CRDR_Health::prune( array_keys( $all ) );
+		// Being outside the hours is normal at night and stays silent. A window that can never open is a mistake:
+		// say so (the rule itself is unchanged, nothing is sent).
+		if ( ! CRDR_Health::window_valid( CRDR_Settings::get( 'send_from' ), CRDR_Settings::get( 'send_to' ) ) ) {
+			foreach ( $auto as $id ) {
+				CRDR_Health::record_block( $id, 'window_invalid' );
+			}
+			return;
+		}
+		CRDR_Health::clear_code_all( 'window_invalid' );
+		// A tick that overlaps the previous one (its 5-minute lock is still held) just leaves the work to it.
 		if ( ! self::in_send_window() || get_transient( self::LOCK ) ) {
 			return;
 		}

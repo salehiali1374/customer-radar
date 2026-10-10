@@ -8,6 +8,7 @@ require __DIR__ . '/../includes/class-crdr-rfm.php';
 require __DIR__ . '/../includes/class-crdr-stats.php';
 require __DIR__ . '/../includes/class-crdr-template.php';
 require __DIR__ . '/../includes/class-crdr-send-rules.php';
+require __DIR__ . '/../includes/class-crdr-health.php';
 
 $fail = 0;
 $pass = 0;
@@ -327,6 +328,35 @@ check( 'localid fits a signed 64-bit integer at the far end', CRDR_Send_Rules::l
 check( 'localid generated value is 19 digits', 1 === preg_match( '/^\d{19}$/', CRDR_Send_Rules::localid() ), true );
 check( 'localid differs between milliseconds', CRDR_Send_Rules::localid( 1790000000001, 5 ) !== CRDR_Send_Rules::localid( 1790000000002, 5 ), true );
 check( 'minimum resend floor is one day', CRDR_Send_Rules::MIN_RESEND, 86400 );
+
+/* ---- health of automatic (cron) campaign runs: pure state transitions ---- */
+list( $st, $ch ) = CRDR_Health::apply_block( array(), 'template', 1000 );
+check( 'health: first block is a change, count 1, since = last', array( $ch, $st['blocked'] ), array( true, array( 'code' => 'template', 'since' => 1000, 'last' => 1000, 'count' => 1 ) ) );
+list( $st2, $ch ) = CRDR_Health::apply_block( $st, 'template', 4600 );
+check( 'health: the same block again is NOT a change; only count and last move', array( $ch, $st2['blocked'] ), array( false, array( 'code' => 'template', 'since' => 1000, 'last' => 4600, 'count' => 2 ) ) );
+list( $st3, $ch ) = CRDR_Health::apply_block( $st2, 'no_provider', 8200 );
+check( 'health: a different reason is a change and restarts since/count', array( $ch, $st3['blocked'] ), array( true, array( 'code' => 'no_provider', 'since' => 8200, 'last' => 8200, 'count' => 1 ) ) );
+list( $st4, $ch ) = CRDR_Health::apply_block( array(), 'something-new', 5 );
+check( 'health: an unknown reason code is stored as "other" (never free text)', $st4['blocked']['code'], 'other' );
+list( $st5, $rec ) = CRDR_Health::apply_run( $st3, array( 'sent' => 4, 'held_out' => 1, 'skipped' => 2, 'failed' => 0, 'unknown' => 0, 'error' => 'free text with 09120000001', 'phone' => '09120000001' ), 9000 );
+check( 'health: an executed run clears the block and reports recovery', array( $rec, isset( $st5['blocked'] ) ), array( true, false ) );
+check( 'health: an executed run keeps counts only (no error text, no personal data)', $st5['last_run'], array( 'ts' => 9000, 'sent' => 4, 'held_out' => 1, 'skipped' => 2, 'failed' => 0, 'unknown' => 0 ) );
+list( $st6, $rec ) = CRDR_Health::apply_run( array(), array( 'sent' => 0 ), 9100 );
+check( 'health: a run with nothing to send is still an executed run, no recovery', array( $rec, $st6['last_run']['sent'] ), array( false, 0 ) );
+check( 'health: a block does not erase the record of the last executed run', CRDR_Health::apply_block( $st5, 'busy', 9500 )[0]['last_run']['sent'], 4 );
+list( $st7, $cl ) = CRDR_Health::clear_code( CRDR_Health::apply_block( array(), 'window_invalid', 1 )[0], 'window_invalid' );
+check( 'health: clear_code removes only the named reason', array( $cl, isset( $st7['blocked'] ) ), array( true, false ) );
+list( $st8, $cl ) = CRDR_Health::clear_code( CRDR_Health::apply_block( array(), 'template', 1 )[0], 'window_invalid' );
+check( 'health: clear_code leaves a different reason alone', array( $cl, $st8['blocked']['code'] ), array( false, 'template' ) );
+check( 'health: window validity (start < end)', array( CRDR_Health::window_valid( 9, 21 ), CRDR_Health::window_valid( 0, 24 ), CRDR_Health::window_valid( 9, 9 ), CRDR_Health::window_valid( 22, 6 ) ), array( true, true, false, false ) );
+check( 'health: a single busy tick does not call for attention', CRDR_Health::needs_attention( array( 'code' => 'busy', 'count' => 1 ) ), false );
+check( 'health: busy three ticks in a row does', CRDR_Health::needs_attention( array( 'code' => 'busy', 'count' => 3 ) ), true );
+foreach ( array( 'template', 'no_provider', 'window_invalid', 'other' ) as $code ) {
+	check( "health: $code calls for attention at once", CRDR_Health::needs_attention( array( 'code' => $code, 'count' => 1 ) ), true );
+	check( "health: $code has a Persian, actionable message", 1 === preg_match( '/\p{Arabic}/u', CRDR_Health::message( $code ) ), true );
+}
+check( 'health: outside the sending hours is expected, never recorded', CRDR_Health::is_recorded( 'outside_window' ), false );
+check( 'health: every real reason is recorded', array_map( array( 'CRDR_Health', 'is_recorded' ), array( 'template', 'no_provider', 'busy', 'window_invalid', 'not_auto', 'mode_off' ) ), array( true, true, true, true, true, true ) );
 
 echo "\n$pass passed, $fail failed\n";
 exit( $fail ? 1 : 0 );

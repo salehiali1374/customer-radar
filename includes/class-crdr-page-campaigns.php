@@ -53,6 +53,7 @@ class CRDR_Page_Campaigns {
 				$ho = $res['holdout']['n'] ? $res['holdout']['conv'] / $res['holdout']['n'] : 0;
 				echo '<li>نتیجه تا امروز: پیام‌گرفته‌ها ' . esc_html( CRDR_UI::pct( $tr, 1 ) ) . ' خرید مجدد، گروه شاهد ' . esc_html( CRDR_UI::pct( $ho, 1 ) ) . '</li>';
 			}
+			echo CRDR_Health::card_item( $id, $pb ); // phpcs:ignore WordPress.Security.EscapeOutput -- escaped inside
 			echo '</ul>';
 			echo '<p class="crdr-actions-row"><button type="button" class="button button-primary crdr-pb-open">پیش‌نمایش و اجرا</button> ';
 			echo '<a class="button" href="' . esc_url( admin_url( 'admin.php?page=customer-radar-campaigns&edit=' . $id ) ) . '">ویرایش</a> ';

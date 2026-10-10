@@ -20,7 +20,7 @@ define( 'CRDR_DIR', plugin_dir_path( __FILE__ ) );
 define( 'CRDR_URL', plugin_dir_url( __FILE__ ) );
 
 foreach ( array(
-	'jalali', 'rfm', 'stats', 'template', 'send-rules', 'db', 'settings', 'analytics', 'audience', 'sms', 'send', 'sync', 'recommend',
+	'jalali', 'rfm', 'stats', 'template', 'send-rules', 'db', 'settings', 'analytics', 'audience', 'sms', 'send', 'health', 'sync', 'recommend',
 	'playbooks', 'insights', 'actions', 'ui',
 	'page-dashboard', 'page-growth', 'page-campaigns', 'page-customers', 'page-products', 'page-settings', 'admin',
 ) as $crdr_file ) {

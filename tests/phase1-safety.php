@@ -411,6 +411,154 @@ t( 'one-off: opt-out is still respected inside the hours', false === $j['success
 wp_delete_user( $uid );
 crdr_t_reset( 0 );
 
+/* ============================ B2. automatic (cron) campaign blocks are observable */
+echo "== cron: blocked runs are recorded and visible\n";
+if ( ! function_exists( 'set_current_screen' ) ) {
+	require_once ABSPATH . 'wp-admin/includes/class-wp-screen.php';
+	require_once ABSPATH . 'wp-admin/includes/screen.php';
+}
+$hs   = function () {
+	$a = get_option( CRDR_Health::OPTION, array() );
+	return isset( $a['dormant'] ) ? $a['dormant'] : array();
+};
+$cronlog = function ( $prefix = 'blocked:' ) {
+	return array_values( array_filter( (array) get_option( CRDR_Send::LOG_OPTION, array() ), function ( $e ) use ( $prefix ) {
+		return 'cron' === $e['trigger'] && 0 === strpos( (string) $e['result'], $prefix );
+	} ) );
+};
+$notice = function () {
+	wp_set_current_user( 1 );
+	return CRDR_Health::notice_html();
+};
+$reset_health = function () {
+	delete_option( CRDR_Health::OPTION );
+	delete_option( CRDR_Send::LOG_OPTION );
+};
+
+// --- invalid template (e.g. saved by an older version, or edited in the database)
+$reset_health();
+crdr_t_cfg( array( 'mode' => 'auto', 'template' => 'سلام {nmae}' ) );
+crdr_t_reset( 6 );
+CRDR_Playbooks::hourly();
+$b = $hs()['blocked'] ?? null;
+t( 'cron + invalid template: nothing sent', 0 === count( crdr_t_requests() ) && 0 === crdr_t_count() );
+t( 'cron + invalid template: the block is recorded with its reason', is_array( $b ) && 'template' === $b['code'] && 1 === $b['count'] && $b['since'] > time() - 60, wp_json_encode( $hs() ) );
+t( 'cron + invalid template: one audit-log entry, marked as cron and blocked', 1 === count( $cronlog() ) && 'blocked:template' === $cronlog()[0]['result'] && 'dormant' === $cronlog()[0]['playbook'] );
+CRDR_Playbooks::hourly();
+CRDR_Playbooks::hourly();
+CRDR_Playbooks::hourly();
+t( 'cron + invalid template: repeated ticks only raise the counter', 4 === $hs()['blocked']['count'] && $hs()['blocked']['since'] === $b['since'] );
+t( 'cron + invalid template: ...and do NOT add log entries (no noise)', 1 === count( $cronlog() ), (string) count( $cronlog() ) );
+$html = $notice();
+t( 'cron + invalid template: the admin sees a persistent warning that names the campaign and the fix', false !== strpos( $html, 'notice-warning' ) && false !== mb_strpos( $html, 'خواب' ) && false !== mb_strpos( $html, CRDR_Health::message( 'template' ) ) && false !== strpos( $html, 'customer-radar-campaigns' ), $html );
+wp_set_current_user( 0 );
+t( 'the warning is only for people who may manage the plugin', '' === CRDR_Health::notice_html() );
+// where it is shown
+wp_set_current_user( 1 );
+$show = function ( $screen ) {
+	set_current_screen( $screen );
+	ob_start();
+	CRDR_Health::admin_notices();
+	return ob_get_clean();
+};
+t( 'warning shows on the WordPress dashboard', '' !== $show( 'dashboard' ) );
+t( 'warning shows on the plugin\'s own pages', '' !== $show( 'toplevel_page_customer-radar' ) && '' !== $show( 'admin_page_customer-radar-campaigns' ) );
+t( 'warning does not take over unrelated admin screens', '' === $show( 'edit-post' ) );
+set_current_screen( 'front' );
+$html = crdr_t_page( array( 'CRDR_Page_Campaigns', 'render' ), array( 'page' => 'customer-radar-campaigns' ) );
+t( 'campaign card shows the block and since when', false !== mb_strpos( $html, 'اجرای خودکار متوقف' ) && false !== mb_strpos( $html, CRDR_Health::message( 'template' ) ) );
+// only automatic campaigns are reported
+crdr_t_cfg( array( 'mode' => 'manual', 'template' => 'سلام {nmae}' ) );
+t( 'a campaign no longer in auto mode is not reported (stale state ignored)', '' === $notice() );
+crdr_t_cfg( array( 'mode' => 'auto', 'template' => 'سلام {nmae}' ) );
+t( 'back in auto mode it is reported again', '' !== $notice() );
+// privacy
+$dump = wp_json_encode( get_option( CRDR_Health::OPTION ) ) . wp_json_encode( get_option( CRDR_Send::LOG_OPTION ) );
+t( 'nothing personal or secret in the recorded state: no key, phone or message text', false === strpos( $dump, 'TESTKEY' ) && false === strpos( $dump, '0912' ) && false === strpos( $dump, 'nmae' ) && false === mb_strpos( $dump, 'سلام' ) );
+
+// --- recovery: fixed template, next tick executes, the block is cleared and the history says so
+crdr_t_cfg( array( 'mode' => 'auto', 'template' => 'سلام {name}' ) );
+CRDR_Playbooks::hourly();
+$st = $hs();
+t( 'recovery: the run executed and sent', 6 === count( crdr_t_requests() ) && 6 === crdr_t_count( "status = 'ok'" ) );
+t( 'recovery: block cleared, last executed run recorded with counts', ! isset( $st['blocked'] ) && 6 === $st['last_run']['sent'] && 0 === $st['last_run']['failed'], wp_json_encode( $st ) );
+t( 'recovery: one "recovered" entry in the log', 1 === count( $cronlog( 'recovered' ) ) );
+t( 'recovery: no warning any more', '' === $notice() );
+$html = crdr_t_page( array( 'CRDR_Page_Campaigns', 'render' ), array( 'page' => 'customer-radar-campaigns' ) );
+t( 'campaign card tells a blocked run apart from an executed one', false === mb_strpos( $html, 'اجرای خودکار متوقف' ) && false !== mb_strpos( $html, 'آخرین اجرای خودکار' ) );
+
+// --- no SMS provider
+$reset_health();
+crdr_t_cfg( array( 'mode' => 'auto' ), array( 'sms_provider' => 'none' ) );
+crdr_t_reset( 4 );
+CRDR_Playbooks::hourly();
+CRDR_Playbooks::hourly();
+t( 'cron + no provider: recorded once as no_provider, counted twice', 'no_provider' === ( $hs()['blocked']['code'] ?? '' ) && 2 === $hs()['blocked']['count'] && 1 === count( $cronlog() ) && 0 === crdr_t_count() );
+t( 'cron + no provider: the warning points to Settings', false !== strpos( $notice(), 'customer-radar-settings' ) );
+crdr_t_cfg( array( 'mode' => 'auto', 'template' => 'سلام {nmae}' ), array( 'sms_provider' => 'none' ) );
+CRDR_Playbooks::hourly();
+t( 'cron: a different reason replaces the old one and is logged as a new event', 'no_provider' === $hs()['blocked']['code'] && 1 === count( $cronlog() ) );
+crdr_t_cfg( array( 'mode' => 'auto', 'template' => 'سلام {nmae}' ) ); // provider fixed, template still bad
+CRDR_Playbooks::hourly();
+t( 'cron: reason changes no_provider -> template: new entry, counter restarted', 'template' === $hs()['blocked']['code'] && 1 === $hs()['blocked']['count'] && 2 === count( $cronlog() ) );
+
+// --- busy campaign lock (held by ANOTHER connection, like a manual run in another request)
+$reset_health();
+crdr_t_cfg( array( 'mode' => 'auto' ) );
+crdr_t_reset( 4 );
+$ln = new ReflectionMethod( 'CRDR_Send', 'lock_name' );
+$ln->setAccessible( true );
+$other = new mysqli( $wpdb->dbhost, DB_USER, DB_PASSWORD, DB_NAME );
+$nm    = $other->real_escape_string( $ln->invoke( null, 'dormant' ) );
+$got   = $other->query( "SELECT GET_LOCK('{$nm}', 0)" )->fetch_row()[0];
+t( 'busy: the second connection holds the lock', '1' === (string) $got );
+CRDR_Playbooks::hourly();
+t( 'busy: recorded, nothing sent', 'busy' === ( $hs()['blocked']['code'] ?? '' ) && 1 === $hs()['blocked']['count'] && 0 === crdr_t_count() );
+t( 'busy: one tick is normal (a manual run may be in progress): no warning yet', '' === $notice() );
+$html = crdr_t_page( array( 'CRDR_Page_Campaigns', 'render' ), array( 'page' => 'customer-radar-campaigns' ) );
+t( 'busy: the campaign card already mentions it', false !== mb_strpos( $html, CRDR_Health::message( 'busy' ) ) );
+CRDR_Playbooks::hourly();
+CRDR_Playbooks::hourly();
+t( 'busy: three ticks in a row raise the warning', 3 === $hs()['blocked']['count'] && false !== mb_strpos( $notice(), CRDR_Health::message( 'busy' ) ) );
+t( 'busy: still one log entry', 1 === count( $cronlog() ) );
+$other->query( "SELECT RELEASE_LOCK('{$nm}')" );
+$other->close();
+CRDR_Playbooks::hourly();
+t( 'busy: once the lock is free the run executes and the block clears', 4 === count( crdr_t_requests() ) && ! isset( $hs()['blocked'] ) && '' === $notice() );
+
+// --- sending hours: expected closure is NOT a problem; an impossible window IS
+$reset_health();
+crdr_t_cfg( array( 'mode' => 'auto' ), $closed );
+crdr_t_reset( 3 );
+CRDR_Playbooks::hourly();
+CRDR_Playbooks::hourly();
+t( 'outside the (valid) hours: nothing sent, nothing recorded, nothing logged, no warning', 0 === count( crdr_t_requests() ) && array() === $hs() && array() === (array) get_option( CRDR_Send::LOG_OPTION, array() ) && '' === $notice() );
+crdr_t_cfg( array( 'mode' => 'auto' ), array( 'send_from' => 22, 'send_to' => 6 ) );
+CRDR_Playbooks::hourly();
+CRDR_Playbooks::hourly();
+t( 'overnight/impossible window (22..6): recorded as window_invalid', 'window_invalid' === ( $hs()['blocked']['code'] ?? '' ) && 2 === $hs()['blocked']['count'] && 0 === count( crdr_t_requests() ) );
+t( 'overnight/impossible window: logged once, warning points to Settings', 1 === count( $cronlog() ) && false !== strpos( $notice(), 'customer-radar-settings' ) );
+crdr_t_cfg( array( 'mode' => 'auto' ), $closed ); // fixed, but it is night right now
+CRDR_Playbooks::hourly();
+t( 'window fixed while the shop is closed: the stale window_invalid warning goes away (rules unchanged: still no send)', ! isset( $hs()['blocked'] ) && 0 === count( crdr_t_requests() ) && '' === $notice() );
+crdr_t_cfg( array( 'mode' => 'manual' ), array( 'send_from' => 22, 'send_to' => 6 ) );
+CRDR_Playbooks::hourly();
+t( 'an impossible window is not reported for campaigns that are not automatic', array() === $hs() );
+
+// --- manual runs never touch the cron health state (a person already sees the answer)
+$reset_health();
+crdr_t_cfg( array( 'mode' => 'manual', 'template' => 'سلام {nmae}' ) );
+CRDR_Playbooks::run( 'dormant', 5, array( 'trigger' => 'manual' ) );
+t( 'manual blocked run: logged as before, but the cron health state is untouched', array() === $hs() && 1 === count( (array) get_option( CRDR_Send::LOG_OPTION ) ) );
+
+// --- housekeeping: state of a deleted campaign is dropped on the next tick
+update_option( CRDR_Health::OPTION, array( 'ghost' => array( 'blocked' => array( 'code' => 'template', 'since' => 1, 'last' => 1, 'count' => 1 ) ) ) );
+crdr_t_cfg( array( 'mode' => 'auto' ) );
+CRDR_Playbooks::hourly();
+t( 'state of a campaign that no longer exists is pruned', ! isset( get_option( CRDR_Health::OPTION )['ghost'] ) );
+$reset_health();
+crdr_t_reset( 0 );
+
 /* ====================================================== C. duplicate sends */
 echo "== duplicate-send prevention\n";
 crdr_t_cfg();

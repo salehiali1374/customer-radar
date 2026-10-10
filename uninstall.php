@@ -16,6 +16,7 @@ delete_option( 'crdr_db_version' );
 delete_option( 'crdr_stats' );
 delete_option( 'crdr_playbooks' );
 delete_option( 'crdr_run_log' );
+delete_option( 'crdr_run_health' );
 delete_transient( 'crdr_pb_lock' );
 wp_clear_scheduled_hook( 'crdr_daily' );
 wp_clear_scheduled_hook( 'crdr_sync_step' );
