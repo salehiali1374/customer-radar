@@ -1289,6 +1289,50 @@ t( 'an already stored overnight window still never opens (fail closed, unchanged
 crdr_t_cfg();
 crdr_t_reset( 0 );
 
+/* ====== C3. a scheduler that does not run is reported ====== */
+echo "== cron overdue\n";
+$sched = function ( $offset ) {
+	wp_clear_scheduled_hook( CRDR_Playbooks::HOURLY );
+	wp_schedule_event( time() + $offset, 'hourly', CRDR_Playbooks::HOURLY );
+};
+$disabled = function ( $on ) {
+	remove_all_filters( 'crdr_wp_cron_disabled' );
+	add_filter( 'crdr_wp_cron_disabled', $on ? '__return_true' : '__return_false' );
+};
+$note = function () {
+	wp_set_current_user( 1 );
+	return CRDR_Health::notice_html();
+};
+delete_option( CRDR_Health::OPTION );
+crdr_t_cfg( array( 'mode' => 'auto' ) );
+crdr_t_reset( 2 );
+$sched( 600 );
+$disabled( true );
+t( 'cron: on time (next run in the future): no warning', '' === $note() );
+$sched( -5 * 3600 );
+t( 'cron, host cron expected: 5 hours overdue raises the warning, telling the owner what to do', false !== mb_strpos( $note(), 'notice-warning' ) && false !== mb_strpos( $note(), 'پیامکی نمی‌فرستند' ) && false !== strpos( $note(), 'cron' ) );
+$disabled( false );
+t( 'cron, WP-Cron on: the same 5 hours is normal on a quiet site, no warning', '' === $note() );
+$sched( -49 * 3600 );
+t( 'cron, WP-Cron on: 49 hours overdue is a real problem', false !== mb_strpos( $note(), 'WP-Cron' ) );
+crdr_t_cfg( array( 'mode' => 'manual' ) );
+t( 'cron: only automatic campaigns depend on it, so no warning without one', '' === $note() );
+crdr_t_cfg( array( 'mode' => 'auto' ) );
+wp_set_current_user( 0 );
+t( 'cron: the warning is only for people who may manage the plugin', '' === CRDR_Health::notice_html() );
+// together with a blocked campaign: one box, both reasons
+CRDR_Health::record_block( 'dormant', 'no_provider' );
+$both = $note();
+t( 'cron: shown together with a campaign problem in the same warning', false !== mb_strpos( $both, 'WP-Cron' ) && false !== mb_strpos( $both, CRDR_Health::message( 'no_provider' ) ) && 1 === substr_count( $both, 'notice-warning' ) );
+// and it clears as soon as the scheduler has run
+$sched( 3000 );
+delete_option( CRDR_Health::OPTION );
+t( 'cron: once the next run is in the future again the warning is gone', '' === $note() );
+remove_all_filters( 'crdr_wp_cron_disabled' );
+wp_clear_scheduled_hook( CRDR_Playbooks::HOURLY );
+wp_schedule_event( time() + 300, 'hourly', CRDR_Playbooks::HOURLY );
+crdr_t_reset( 0 );
+
 /* ====================================================== C. duplicate sends */
 echo "== duplicate-send prevention\n";
 crdr_t_cfg();

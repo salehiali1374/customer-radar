@@ -519,5 +519,17 @@ check( 'clean_error: a clean text is returned unchanged (idempotent)', CRDR_Send
 check( 'clean_error: running it twice changes nothing', CRDR_Send_Rules::clean_error( CRDR_Send_Rules::clean_error( 'کاوه‌نگار (418): x', array() ), array() ), CRDR_Send_Rules::failure_reason( 418 ) );
 check( 'clean_error: the result fits the 255-character column', mb_strlen( CRDR_Send_Rules::clean_error( str_repeat( 'ا', 600 ), array() ) ) <= 255, true );
 
+/* ---- is the scheduler (WP-Cron) running? judged from when the next hourly run was due ---- */
+$H = 3600;
+$now = 2000000000;
+check( 'cron: nothing scheduled gives no verdict (WordPress re-schedules on the next request)', CRDR_Health::cron_overdue( 0, $now, true ), 0 );
+check( 'cron: the next run is in the future: fine', CRDR_Health::cron_overdue( $now + 600, $now, true ), 0 );
+check( 'cron, host cron expected: 2h59m overdue is still fine, 3h01m is a problem', array( CRDR_Health::cron_overdue( $now - ( 3 * $H - 60 ), $now, true ), CRDR_Health::cron_overdue( $now - ( 3 * $H + 60 ), $now, true ) ), array( 0, 3 * $H + 60 ) );
+check( 'cron, WP-Cron on: 5 hours overdue is normal on a quiet site (the next visit runs it)', CRDR_Health::cron_overdue( $now - 5 * $H, $now, false ), 0 );
+check( 'cron, WP-Cron on: 47h is fine, 49h is a problem (a visit would have run it)', array( CRDR_Health::cron_overdue( $now - 47 * $H, $now, false ), CRDR_Health::cron_overdue( $now - 49 * $H, $now, false ) ), array( 0, 49 * $H ) );
+foreach ( array( true, false ) as $disabled ) {
+	check( 'cron message (' . ( $disabled ? 'host cron' : 'WP-Cron' ) . '): Persian, says the hours, says automatic campaigns send nothing, says what to do', 1 === preg_match( '/\p{Arabic}/u', CRDR_Health::cron_message( 6 * $H, $disabled ) ) && false !== strpos( CRDR_Health::cron_message( 6 * $H, $disabled ), '۶' ) && false !== mb_strpos( CRDR_Health::cron_message( 6 * $H, $disabled ), 'پیامکی نمی‌فرستند' ) && false !== strpos( CRDR_Health::cron_message( 6 * $H, $disabled ), 'cron' ), true );
+}
+
 echo "\n$pass passed, $fail failed\n";
 exit( $fail ? 1 : 0 );

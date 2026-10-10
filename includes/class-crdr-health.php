@@ -25,6 +25,10 @@ class CRDR_Health {
 	/** A single busy tick is normal (a manual run may be in progress); this many in a row is worth a warning. */
 	const BUSY_TICKS = 3;
 
+	/** How late the hourly run may be before it is a problem (see cron_overdue). */
+	const CRON_LATE_HOST = 10800;  // 3 h: the host's own cron is expected to run it
+	const CRON_LATE_WP   = 172800; // 48 h: WP-Cron needs a visit; a quiet shop is normally late for hours
+
 	/* ------------------------------------------------------- pure state rules */
 
 	public static function codes() {
@@ -82,6 +86,39 @@ class CRDR_Health {
 			return (int) $blocked['count'] >= self::BUSY_TICKS;
 		}
 		return true;
+	}
+
+	/**
+	 * Seconds the hourly run is overdue, or 0 when that is not a problem. WordPress keeps the time of the next scheduled run;
+	 * if the scheduler does not run, that time stays in the past. How late is "too late" depends on who is expected to run it:
+	 *  - the host's own cron (DISABLE_WP_CRON): it runs every few minutes, so 3 hours late means it is not configured or broken;
+	 *  - WP-Cron: it only runs when somebody visits the site, so a quiet shop is legitimately late for hours (and the admin's
+	 *    own visit runs it); only 48 hours late means visits do not trigger it either (blocked loopback requests, a caching
+	 *    layer, ...).
+	 *
+	 * @param int  $next_ts  wp_next_scheduled(), 0 / false when nothing is scheduled (WordPress re-schedules on the next request)
+	 */
+	public static function cron_overdue( $next_ts, $now, $wp_cron_disabled ) {
+		if ( ! $next_ts ) {
+			return 0;
+		}
+		$late = (int) $now - (int) $next_ts;
+		$max  = $wp_cron_disabled ? self::CRON_LATE_HOST : self::CRON_LATE_WP;
+		return $late > $max ? $late : 0;
+	}
+
+	/** What the owner should do about a scheduler that does not run, in Persian. */
+	public static function cron_message( $overdue, $wp_cron_disabled ) {
+		$hours = CRDR_Jalali::digits( (string) max( 1, (int) floor( $overdue / 3600 ) ) );
+		if ( $wp_cron_disabled ) {
+			return 'اجرای خودکار هر ساعت حدود ' . $hours . ' ساعت است که انجام نشده. در این سایت WP-Cron خاموش شده (DISABLE_WP_CRON) و باید یک cron واقعی هاست هر چند دقیقه یک‌بار wp-cron.php را فراخوانی کند؛ آن را بررسی کنید. تا آن موقع کمپین‌های «خودکار» پیامکی نمی‌فرستند.';
+		}
+		return 'زمان‌بند وردپرس (WP-Cron) حدود ' . $hours . ' ساعت است که اجرا نشده؛ ممکن است سایت بازدیدی نداشته یا WP-Cron مسدود باشد. تا وقتی اجرا نشود، کمپین‌های «خودکار» پیامکی نمی‌فرستند. بهتر است روی هاست یک cron واقعی بسازید که هر ساعت wp-cron.php را فراخوانی کند.';
+	}
+
+	/** DISABLE_WP_CRON is set: the host is expected to run the scheduler. (Filterable so that tests can pose both cases.) */
+	public static function wp_cron_disabled() {
+		return (bool) apply_filters( 'crdr_wp_cron_disabled', defined( 'DISABLE_WP_CRON' ) && DISABLE_WP_CRON );
 	}
 
 	/** What the owner should do, in Persian. */
@@ -191,25 +228,37 @@ class CRDR_Health {
 		return admin_url( 'admin.php?page=customer-radar-campaigns' );
 	}
 
-	/** Persistent warning about automatic campaigns that are blocked. '' when there is nothing to say. */
+	/** Persistent warning about automatic campaigns that are blocked or cannot run. '' when there is nothing to say. */
 	public static function notice_html() {
 		if ( ! current_user_can( CRDR_Actions::CAP ) ) {
 			return '';
 		}
-		$state = self::load();
-		$items = '';
+		$state    = self::load();
+		$items    = '';
+		$has_auto = false;
 		foreach ( CRDR_Playbooks::all() as $id => $pb ) {
-			if ( 'auto' !== $pb['mode'] || empty( $state[ $id ]['blocked'] ) || ! self::needs_attention( $state[ $id ]['blocked'] ) ) {
+			if ( 'auto' !== $pb['mode'] ) {
+				continue;
+			}
+			$has_auto = true;
+			if ( empty( $state[ $id ]['blocked'] ) || ! self::needs_attention( $state[ $id ]['blocked'] ) ) {
 				continue;
 			}
 			$b      = $state[ $id ]['blocked'];
 			$items .= '<li><strong>' . esc_html( $pb['name'] ) . '</strong>: ' . esc_html( self::message( $b['code'] ) )
 				. ' <span class="description">(از ' . esc_html( self::when( $b['since'] ) ) . ')</span> <a href="' . esc_url( self::fix_url( $id, $b['code'] ) ) . '">رفع مشکل</a></li>';
 		}
-		if ( '' === $items ) {
+		$cron    = '';
+		$overdue = $has_auto ? self::cron_overdue( (int) wp_next_scheduled( CRDR_Playbooks::HOURLY ), time(), self::wp_cron_disabled() ) : 0;
+		if ( $overdue ) { // nothing here would otherwise tell the owner: a scheduler that does not run leaves no trace of its own
+			$cron = '<p>' . esc_html( self::cron_message( $overdue, self::wp_cron_disabled() ) ) . '</p>';
+		}
+		if ( '' === $items && '' === $cron ) {
 			return '';
 		}
-		return '<div class="notice notice-warning"><p><strong>رادار مشتری: ارسال خودکار بعضی کمپین‌ها متوقف شده و پیامکی نمی‌رود.</strong></p><ul style="list-style:disc;margin-inline-start:20px">' . $items . '</ul></div>';
+		return '<div class="notice notice-warning">'
+			. ( '' !== $items ? '<p><strong>رادار مشتری: ارسال خودکار بعضی کمپین‌ها متوقف شده و پیامکی نمی‌رود.</strong></p><ul style="list-style:disc;margin-inline-start:20px">' . $items . '</ul>' : '' )
+			. $cron . '</div>';
 	}
 
 	/** admin_notices: the dashboard and this plugin's own screens (not every admin page). */

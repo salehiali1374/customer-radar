@@ -23,3 +23,17 @@
   reached it. Those become `failed` (nothing was sent; the customer may be tried again). Everything else stays `unknown` (never
   retried, counts as contacted). A slow process whose claim was recovered fails its own "record the text" step and sends nothing.
   The 600 s value is unchanged and its boundary is tested (599 s untouched, 601 s recovered).
+
+## 3. WP-Cron does not run
+* **Behaviour (before):** the automatic campaigns run from the hourly WordPress event `crdr_hourly`. If the scheduler does not
+  run (WP-Cron switched off without a real cron, blocked loopback requests, a site nobody visits), nothing is recorded, because
+  nothing runs: the campaign card just shows an old "last automatic run" date and no SMS goes out.
+* **Risk:** high for an owner who relies on "auto": silent, and common on small hosts.
+* **Decision:** WordPress keeps the time the next run was due; if that time stays in the past the scheduler is not running.
+  The persistent warning (dashboard and plugin pages, administrators only, only when an automatic campaign exists) now says so:
+  - `DISABLE_WP_CRON` is set (the host must run it): warn when 3 hours late;
+  - WP-Cron: it needs visits, so a quiet shop is legitimately late for hours and the admin's own visit runs it; warn only when
+    48 hours late.
+  The text tells the owner what to set up (a real cron calling `wp-cron.php` every hour). No heartbeat or extra write is added.
+* **Limits:** it cannot warn before the thresholds, and a site on WP-Cron with very low traffic may send late (no visits, no run);
+  that is how WP-Cron works, and the 48-hour rule only reports a scheduler that visits do not wake up.
