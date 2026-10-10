@@ -94,6 +94,8 @@
 				post('crdr_pb_mode', { id: card.dataset.id, mode: mode.dataset.mode }).then(function (res) {
 					if (res.success) {
 						card.querySelectorAll('.crdr-mode').forEach(function (b) { b.classList.toggle('is-on', b === mode); });
+					} else {
+						window.alert((res.data && res.data.message) || 'تغییر حالت کمپین انجام نشد.');
 					}
 				});
 				return;
@@ -112,10 +114,17 @@
 		});
 
 		var render = function (p, title, id, mode) {
-			var runnable = mode !== 'off' && p.audience > 0 && p.today < p.cap;
+			// The server decides again on every run; this only mirrors its answer.
+			var badText = p.template_errors && p.template_errors.length;
+			var overridable = p.blocked === 'outside_window' && p.can_override && !badText && mode !== 'off';
+			var runnable = mode !== 'off' && p.audience > 0 && p.today < p.cap && !badText && (!p.blocked || overridable);
 			var html = '<h2>' + esc(title) + '</h2>';
 			html += '<p>مخاطب فعلی: <strong>' + digits(p.audience) + ' نفر</strong>' + (p.audience ? ' · میانگین سبد ' + esc(p.aov_fmt) : '') + '<br>سقف امروز: ' + digits(p.today) + ' از ' + digits(p.cap) + ' ارسال‌شده · ' + digits(p.holdout) + '٪ گروه شاهد (پیام نمی‌گیرند تا اثر واقعی سنجیده شود) · سرویس پیامک: ' + esc(p.provider) + '</p>';
-			if (!p.in_window) { html += '<p class="crdr-bad">الان خارج از ساعت مجاز ارسال است (از «تنظیمات» قابل تغییر). اجرای دستی همچنان ممکن است.</p>'; }
+			if (badText) { html += '<p class="crdr-bad">متن پیام این کمپین اشکال دارد و ارسال نمی‌شود. از «ویرایش» اصلاحش کنید:<br>' + p.template_errors.map(esc).join('<br>') + '</p>'; }
+			else if (p.blocked && mode !== 'off') { html += '<p class="crdr-bad">' + esc(p.blocked_message) + '</p>'; }
+			if (overridable) {
+				html += '<p><label><input type="checkbox" id="crdr-override"> ارسال خارج از ساعت مجاز (فقط مدیر سایت؛ این اقدام با نام شما ثبت می‌شود)</label></p>';
+			}
 			if (p.samples.length) {
 				html += '<h3>نمونه پیام‌ها</h3>';
 				p.samples.forEach(function (s) { html += '<div class="crdr-sample"><strong>' + esc(s.name || 'مشتری') + ':</strong> ' + esc(s.message) + '<div class="crdr-muted">' + digits(s.parts) + ' بخش پیامک · کد تخفیف در ارسال واقعی ساخته می‌شود</div></div>'; });
@@ -130,22 +139,27 @@
 			var runBtn = document.getElementById('crdr-run');
 			if (!runBtn) { return; }
 			runBtn.addEventListener('click', function () {
+				var ov = document.getElementById('crdr-override');
+				var override = !!(ov && ov.checked);
+				if (overridable && !override) { window.alert('الان خارج از ساعت مجاز ارسال است. برای ادامه، گزینه‌ی «ارسال خارج از ساعت مجاز» را تیک بزنید.'); return; }
+				if (override && !window.confirm('این ارسال خارج از ساعت مجاز انجام می‌شود و با نام شما ثبت خواهد شد. مطمئنید؟')) { return; }
 				if (!window.confirm('پیامک‌ها واقعاً ارسال می‌شوند. ادامه می‌دهید؟')) { return; }
 				runBtn.disabled = true;
 				var log = document.getElementById('crdr-runlog');
 				log.hidden = false;
-				var tot = { sent: 0, held_out: 0, skipped: 0, failed: 0 };
+				var tot = { sent: 0, held_out: 0, skipped: 0, failed: 0, unknown: 0 };
 				var line = function (t) { log.innerHTML += esc(t) + '<br>'; log.scrollTop = log.scrollHeight; };
 				var step = function () {
-					post('crdr_pb_run', { id: id }).then(function (res) {
+					post('crdr_pb_run', { id: id, override: override ? 1 : 0 }).then(function (res) {
 						if (!res.success) { line('خطا'); return; }
 						var r = res.data;
-						['sent', 'held_out', 'skipped', 'failed'].forEach(function (k) { tot[k] += r[k]; });
-						var did = r.sent + r.held_out + r.skipped + r.failed;
-						line('ارسال: ' + digits(tot.sent) + ' · گروه شاهد: ' + digits(tot.held_out) + ' · ردشده: ' + digits(tot.skipped) + ' · ناموفق: ' + digits(tot.failed));
+						if (r.blocked) { line('اجرا انجام نشد: ' + r.error); return; }
+						['sent', 'held_out', 'skipped', 'failed', 'unknown'].forEach(function (k) { tot[k] += (r[k] || 0); });
+						var did = r.sent + r.held_out + r.skipped + r.failed + (r.unknown || 0);
+						line('ارسال: ' + digits(tot.sent) + ' · گروه شاهد: ' + digits(tot.held_out) + ' · ردشده: ' + digits(tot.skipped) + ' · ناموفق: ' + digits(tot.failed) + (tot.unknown ? ' · نتیجه نامشخص: ' + digits(tot.unknown) : ''));
 						if (r.error) { line('پیام خطا: ' + r.error); }
 						if (did > 0 && r.left > 0 && !r.error) { setTimeout(step, 400); } else { line('پایان. ' + (r.left <= 0 ? 'به سقف امروز رسید.' : '')); }
-					}).catch(function () { line('خطای ارتباط با سرور'); });
+					}).catch(function () { line('خطای ارتباط با سرور؛ وضعیت را در «نتایج» کمپین بررسی کنید و دوباره اجرا نکنید.'); });
 				};
 				step();
 			});

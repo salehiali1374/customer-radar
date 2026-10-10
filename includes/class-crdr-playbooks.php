@@ -126,7 +126,26 @@ class CRDR_Playbooks {
 		return isset( $all[ $id ] ) ? $all[ $id ] : null;
 	}
 
-	/** Validate and store the editable fields of one playbook. */
+	/** Which placeholders a campaign's template may use, given its offer and type. */
+	public static function template_context( array $pb ) {
+		return array(
+			'offer' => isset( $pb['offer']['type'] ) && 'percent' === $pb['offer']['type'],
+			'reco'  => ! empty( $pb['cross_sell'] ),
+		);
+	}
+
+	/** Persian problems with a campaign's message text; empty = valid. */
+	public static function template_errors( array $pb ) {
+		return CRDR_Template::validate( isset( $pb['template'] ) ? $pb['template'] : '', self::template_context( $pb ) );
+	}
+
+	/**
+	 * Validate and store the editable fields of one playbook.
+	 *
+	 * @return bool|string[] true when saved, false when the campaign does not exist, or a list of Persian
+	 *                       validation errors (nothing is stored; the submitted values are kept as a short-lived
+	 *                       draft so the form can be shown again).
+	 */
 	public static function save( $id, array $in ) {
 		$saved = get_option( self::OPTION, array() );
 		$saved = is_array( $saved ) ? $saved : array();
@@ -134,6 +153,32 @@ class CRDR_Playbooks {
 		if ( ! $cur ) {
 			return false;
 		}
+		$cfg    = self::build_config( $cur, $in );
+		$errors = self::template_errors( $cfg );
+		if ( $errors ) {
+			set_transient( self::draft_key( $id ), array( 'cfg' => $cfg, 'errors' => $errors ), 15 * MINUTE_IN_SECONDS );
+			return $errors;
+		}
+		delete_transient( self::draft_key( $id ) );
+		$saved[ $id ] = $cfg;
+		// Built-in audience overrides replace the default audience entirely.
+		update_option( self::OPTION, $saved, false );
+		return true;
+	}
+
+	private static function draft_key( $id ) {
+		return 'crdr_draft_' . get_current_user_id() . '_' . substr( md5( (string) $id ), 0, 12 );
+	}
+
+	/** The rejected form values and their errors (one-shot), or null. */
+	public static function take_draft( $id ) {
+		$d = get_transient( self::draft_key( $id ) );
+		delete_transient( self::draft_key( $id ) );
+		return is_array( $d ) ? $d : null;
+	}
+
+	/** Turn submitted form values into a campaign configuration (not validated against the template rules). */
+	private static function build_config( array $cur, array $in ) {
 		$aud = CRDR_Audience::normalize( array_merge( (array) $in, array( 'segments' => isset( $in['segments'] ) ? (array) $in['segments'] : array() ) ) );
 		// Only keep keys that make sense for an audience definition.
 		$aud = array_intersect_key( $aud, array_flip( array( 'segments', 'min_orders', 'max_orders', 'min_days', 'max_days', 'min_ratio', 'max_ratio', 'min_spent', 'max_spent', 'product' ) ) );
@@ -149,7 +194,8 @@ class CRDR_Playbooks {
 				'percent' => max( 1, min( 90, (int) ( $in['offer_percent'] ?? 10 ) ) ),
 				'days'    => max( 1, min( 90, (int) ( $in['offer_days'] ?? 7 ) ) ),
 			),
-			'template'    => isset( $in['template'] ) ? mb_substr( sanitize_textarea_field( $in['template'] ), 0, 400 ) : $cur['template'],
+			// Not cut to length here: a silent cut could slice a {placeholder} in half. validate() rejects texts that are too long.
+			'template'    => isset( $in['template'] ) ? sanitize_textarea_field( $in['template'] ) : $cur['template'],
 			'daily_cap'   => max( 1, min( 500, (int) ( $in['daily_cap'] ?? $cur['daily_cap'] ) ) ),
 			'holdout_pct' => max( 0, min( 50, (int) ( $in['holdout_pct'] ?? $cur['holdout_pct'] ) ) ),
 			'window_days' => max( 3, min( 90, (int) ( $in['window_days'] ?? $cur['window_days'] ) ) ),
@@ -167,15 +213,23 @@ class CRDR_Playbooks {
 		if ( ! empty( $in['cross_sell'] ) && ! $cur['builtin'] ) {
 			$cfg['cross_sell'] = true;
 		}
-		$saved[ $id ] = $cfg;
-		// Built-in audience overrides replace the default audience entirely.
-		update_option( self::OPTION, $saved, false );
-		return true;
+		return $cfg;
 	}
 
+	/**
+	 * Switch a campaign's mode. Turning it on (manual/auto) is refused while its message text is invalid.
+	 *
+	 * @return bool|string[] true, false (unknown campaign / mode), or the Persian template errors
+	 */
 	public static function set_mode( $id, $mode ) {
 		if ( ! in_array( $mode, array( 'off', 'manual', 'auto' ), true ) || ! self::get( $id ) ) {
 			return false;
+		}
+		if ( 'off' !== $mode ) {
+			$errors = self::template_errors( self::get( $id ) );
+			if ( $errors ) {
+				return $errors;
+			}
 		}
 		$saved = get_option( self::OPTION, array() );
 		$saved = is_array( $saved ) ? $saved : array();
@@ -224,16 +278,25 @@ class CRDR_Playbooks {
 
 	/* ----------------------------------------------------------- send rules */
 
-	public static function in_send_window() {
-		$h = (int) wp_date( 'G' );
-		return $h >= (int) CRDR_Settings::get( 'send_from' ) && $h < (int) CRDR_Settings::get( 'send_to' );
+	/** Inside the allowed sending hours (site timezone)? Same rule as before: from <= hour < to. */
+	public static function in_send_window( $ts = null ) {
+		$ts = null === $ts ? time() : (int) $ts;
+		return CRDR_Send_Rules::in_window(
+			CRDR_Send_Rules::hour_in_tz( $ts, wp_timezone() ),
+			CRDR_Settings::get( 'send_from' ),
+			CRDR_Settings::get( 'send_to' )
+		);
 	}
 
+	/**
+	 * SMS counted against today's cap: sent ones plus those still being sent or whose outcome is unknown
+	 * (an unknown SMS may well have gone out, so it must use up the cap).
+	 */
 	public static function sent_today( $id ) {
 		global $wpdb;
 		$start = ( new DateTime( 'today', wp_timezone() ) )->getTimestamp();
 		return (int) $wpdb->get_var( $wpdb->prepare(
-			"SELECT COUNT(*) FROM " . CRDR_DB::contacts() . " WHERE playbook = %s AND kind = 'sms' AND grp = 'treated' AND status = 'ok' AND created_ts >= %d", // phpcs:ignore WordPress.DB.PreparedSQL
+			"SELECT COUNT(*) FROM " . CRDR_DB::contacts() . " WHERE playbook = %s AND kind = 'sms' AND grp = 'treated' AND status IN ('ok','pending','unknown') AND created_ts >= %d", // phpcs:ignore WordPress.DB.PreparedSQL
 			$id,
 			$start
 		) );
@@ -257,7 +320,12 @@ class CRDR_Playbooks {
 		return $len <= 70 ? 1 : (int) ceil( $len / 67 );
 	}
 
-	/** Compose the message for one customer. @return array [message, extra(coupon vars), coupon_code|''] */
+	/**
+	 * Compose the message for one customer.
+	 *
+	 * @return array [ message, coupon_code|'', render ]; render['ok'] is false when a placeholder could not be
+	 *               filled or the template is malformed. Such a message must NOT be sent.
+	 */
 	public static function compose( array $pb, array $cust, $make_coupon, $reco = null ) {
 		$extra = array( '{optout}' => (string) CRDR_Settings::get( 'optout_text' ) );
 		$code  = '';
@@ -278,8 +346,9 @@ class CRDR_Playbooks {
 			$extra['{url}']     = $reco['url'];
 			$extra['{bought}']  = $reco['because'];
 		}
-		$msg = trim( preg_replace( '/\s+/u', ' ', CRDR_Actions::render_template( $pb['template'], $cust, $extra ) ) );
-		return array( $msg, 'XXXXXXXX' === $code ? '' : $code );
+		$render = CRDR_Actions::render_checked( $pb['template'], $cust, $extra );
+		$msg    = trim( preg_replace( '/\s+/u', ' ', $render['text'] ) );
+		return array( $msg, 'XXXXXXXX' === $code ? '' : $code, $render );
 	}
 
 	/* ---------------------------------------------------------------- preview */
@@ -302,47 +371,109 @@ class CRDR_Playbooks {
 			list( $msg ) = self::compose( $pb, $cust, false, $reco );
 			$samples[]   = array( 'name' => $cust['name'], 'message' => $msg, 'parts' => self::sms_parts( $msg ) );
 		}
-		$take = min( $sum['n'], (int) $pb['daily_cap'] );
+		$take      = min( $sum['n'], (int) $pb['daily_cap'] );
+		$in_window = self::in_send_window();
+		// What would a manual click do right now (without the explicit override)? The server decides again on every run.
+		$gate = CRDR_Send_Rules::gate( $pb['mode'], 'manual', $in_window, false, false );
 		return array(
-			'audience'  => $sum['n'],
-			'aov'       => $sum['aov'],
-			'cap'       => (int) $pb['daily_cap'],
-			'today'     => self::sent_today( $id ),
-			'holdout'   => (int) $pb['holdout_pct'],
-			'samples'   => $samples,
-			'scenario'  => CRDR_Stats::scenario( $take, $sum['aov'], (array) $pb['scenario'] ),
-			'in_window' => self::in_send_window(),
-			'provider'  => CRDR_SMS::provider_label(),
+			'audience'        => $sum['n'],
+			'aov'             => $sum['aov'],
+			'cap'             => (int) $pb['daily_cap'],
+			'today'           => self::sent_today( $id ),
+			'holdout'         => (int) $pb['holdout_pct'],
+			'samples'         => $samples,
+			'scenario'        => CRDR_Stats::scenario( $take, $sum['aov'], (array) $pb['scenario'] ),
+			'in_window'       => $in_window,
+			'provider'        => CRDR_SMS::provider_label(),
+			'mode'            => $pb['mode'],
+			'template_errors' => self::template_errors( $pb ),
+			'blocked'         => $gate['allowed'] ? '' : $gate['code'],
+			'blocked_message' => $gate['allowed'] ? '' : CRDR_Send_Rules::gate_message( $gate['code'] ),
+			'can_override'    => ( 'outside_window' === $gate['code'] ) && CRDR_Send::can_override_window(),
 		);
 	}
 
 	/* -------------------------------------------------------------------- run */
 
 	/**
-	 * Contact up to $limit customers (respecting the daily cap). Safe to call repeatedly:
-	 * contacted customers leave the audience through the cooldown.
+	 * Contact up to $limit customers (respecting the daily cap). Safe to call repeatedly and from several
+	 * processes at once: every customer is claimed atomically before an SMS is sent (see CRDR_Send).
 	 *
-	 * @return array sent, held_out, skipped, failed, left (remaining daily cap)
+	 * The server decides whether the run is allowed (campaign mode + sending hours); the UI only mirrors that.
+	 *
+	 * @param array $opts trigger: 'manual' (default, a person pressed run) | 'cron';
+	 *                    override_window: ask to send outside the allowed hours (manual only, needs the
+	 *                    'manage_options' capability, and is recorded in the run log)
+	 * @return array sent, held_out, skipped, failed, unknown, left (remaining daily cap), error, blocked (reason code)
 	 */
-	public static function run( $id, $limit = 20 ) {
-		global $wpdb;
-		$res = array( 'sent' => 0, 'held_out' => 0, 'skipped' => 0, 'failed' => 0, 'left' => 0, 'error' => '' );
-		$pb  = self::get( $id );
+	public static function run( $id, $limit = 20, array $opts = array() ) {
+		$opts = array_merge( array( 'trigger' => 'manual', 'override_window' => false ), $opts );
+		$res  = array( 'sent' => 0, 'held_out' => 0, 'skipped' => 0, 'failed' => 0, 'unknown' => 0, 'left' => 0, 'error' => '', 'blocked' => '' );
+		$pb   = self::get( $id );
 		if ( ! $pb ) {
 			$res['error'] = 'کمپین پیدا نشد.';
 			return $res;
 		}
-		if ( 'none' === CRDR_SMS::provider() ) {
-			$res['error'] = 'سرویس پیامک تنظیم نشده است.';
+		$in_window = self::in_send_window();
+		$gate      = CRDR_Send_Rules::gate( $pb['mode'], $opts['trigger'], $in_window, ! empty( $opts['override_window'] ), CRDR_Send::can_override_window() );
+		$entry     = array(
+			'run'       => bin2hex( random_bytes( 8 ) ),
+			'ts'        => time(),
+			'playbook'  => $id,
+			'trigger'   => $opts['trigger'],
+			'user'      => get_current_user_id(),
+			'mode'      => $pb['mode'],
+			'in_window' => $in_window,
+			'override'  => $gate['override'], // true = the sending hours were deliberately bypassed by that user.
+		);
+		$block = function ( $code, $message ) use ( &$res, &$entry ) {
+			$res['error']   = $message;
+			$res['blocked'] = $code;
+			if ( 'manual' === $entry['trigger'] ) { // a refused click is worth keeping; a refused cron tick is not.
+				CRDR_Send::log_run( $entry + array( 'result' => 'blocked:' . $code ) );
+			}
 			return $res;
+		};
+		if ( ! $gate['allowed'] ) {
+			return $block( $gate['code'], CRDR_Send_Rules::gate_message( $gate['code'] ) );
 		}
-		$left = self::cap_left( $id, $pb );
+		if ( 'none' === CRDR_SMS::provider() ) {
+			return $block( 'no_provider', 'سرویس پیامک تنظیم نشده است.' );
+		}
+		$problems = self::template_errors( $pb );
+		if ( $problems ) {
+			return $block( 'template', 'متن پیام این کمپین معتبر نیست و پیامی ارسال نشد: ' . $problems[0] );
+		}
+		$lock = CRDR_Send::run_lock( $id );
+		if ( 'busy' === $lock ) {
+			return $block( 'busy', 'این کمپین هم‌اکنون در حال اجراست (اجرای خودکار یا دستی دیگر). چند دقیقه بعد دوباره تلاش کنید.' );
+		}
+		try {
+			$res = self::run_claimed( $id, $pb, (int) $limit, $entry['run'], $res );
+		} finally {
+			if ( 'got' === $lock ) {
+				CRDR_Send::run_unlock( $id );
+			}
+		}
+		CRDR_Send::log_run( $entry + array(
+			'result' => 'ran',
+			'counts' => array_intersect_key( $res, array_flip( array( 'sent', 'held_out', 'skipped', 'failed', 'unknown' ) ) ),
+		) );
+		return $res;
+	}
+
+	/** The sending loop; only called while this campaign's run lock is held (or unsupported). */
+	private static function run_claimed( $id, array $pb, $limit, $run_id, array $res ) {
+		global $wpdb;
+		CRDR_Send::recover_stale();
+		$left        = self::cap_left( $id, $pb );
 		$res['left'] = $left;
 		if ( $left <= 0 ) {
 			return $res;
 		}
-		$take = min( (int) $limit, 50 );
-		$rows = $wpdb->get_results( $wpdb->prepare(
+		$take     = min( $limit, 50 );
+		$cooldown = isset( $pb['cooldown'] ) ? (int) $pb['cooldown'] : null;
+		$rows     = $wpdb->get_results( $wpdb->prepare(
 			'SELECT * FROM ' . CRDR_DB::customers() . ' c ' . CRDR_Audience::where( self::filter( $pb ) ) . ' ORDER BY c.priority DESC, c.total_spent DESC LIMIT %d', // phpcs:ignore WordPress.DB.PreparedSQL
 			$take * 2
 		), ARRAY_A );
@@ -355,27 +486,63 @@ class CRDR_Playbooks {
 			if ( ! empty( $pb['cross_sell'] ) ) {
 				$reco = CRDR_Recommend::for_customer( $cust['ckey'] );
 				if ( ! $reco ) {
-					CRDR_DB::add_contact( $cust['ckey'], 'skip', array( 'playbook' => $id, 'status' => 'norec', 'message' => 'محصول مکمل مناسبی پیدا نشد' ) );
+					CRDR_DB::add_contact( $cust['ckey'], 'skip', array( 'playbook' => $id, 'status' => 'norec', 'message' => 'محصول مکمل مناسبی پیدا نشد', 'run_id' => $run_id ) );
 					$res['skipped']++;
 					continue;
 				}
 			}
-			if ( self::is_holdout( $cust['ckey'], $id, (int) $pb['holdout_pct'] ) ) {
-				CRDR_DB::add_contact( $cust['ckey'], 'sms', array( 'playbook' => $id, 'grp' => 'holdout', 'status' => 'holdout' ) );
+			$holdout = self::is_holdout( $cust['ckey'], $id, (int) $pb['holdout_pct'] );
+			$claim   = CRDR_Send::claim( $cust['ckey'], $id, $run_id, $holdout ? 'holdout' : 'treated', $cooldown );
+			if ( isset( $claim['skip'] ) ) {
+				if ( 'error' === $claim['skip'] ) { // cannot record the claim -> cannot guarantee "no duplicate": stop.
+					$res['error'] = 'ثبت وضعیت ارسال ممکن نشد؛ برای جلوگیری از پیام تکراری، اجرا متوقف شد.';
+					break;
+				}
+				$res['skipped']++; // taken by a parallel run, or contacted/opted out since the audience was read.
+				continue;
+			}
+			$row = $claim['id'];
+			if ( $holdout ) {
+				CRDR_Send::finalize( $row, 'holdout' );
 				$res['held_out']++;
 				continue;
 			}
-			list( $msg, $code ) = self::compose( $pb, $cust, true, $reco );
-			list( $ok, $err )   = CRDR_SMS::send( $cust['phone'], $msg );
-			CRDR_DB::add_contact( $cust['ckey'], 'sms', array(
-				'playbook' => $id, 'grp' => 'treated', 'coupon' => $code, 'message' => $msg,
-				'status' => $ok ? 'ok' : 'failed', 'error' => $ok ? '' : $err,
-			) );
-			if ( $ok ) {
+			if ( self::sent_today( $id ) > (int) $pb['daily_cap'] ) { // the count includes this claim.
+				CRDR_Send::release( $row );
+				break;
+			}
+			try {
+				list( $msg, $code, $render ) = self::compose( $pb, $cust, true, $reco );
+			} catch ( \Throwable $e ) {
+				CRDR_Send::finalize( $row, 'failed', 'ساخت پیام یا کد تخفیف ناموفق بود: ' . $e->getMessage() );
+				$res['failed']++;
+				$res['error'] = 'ساخت پیام یا کد تخفیف ناموفق بود.';
+				if ( $res['failed'] >= 3 ) {
+					break;
+				}
+				continue;
+			}
+			if ( ! $render['ok'] ) { // never send a message with an unfilled placeholder.
+				$why = CRDR_Template::explain( $render );
+				CRDR_Send::finalize( $row, 'failed', $why );
+				$res['failed']++;
+				$res['error'] = $why;
+				if ( $res['failed'] >= 3 ) {
+					break;
+				}
+				continue;
+			}
+			$out = CRDR_Send::send_claimed( $row, $cust['phone'], $msg, $code );
+			if ( 'sent' === $out['state'] ) {
 				$res['sent']++;
+			} elseif ( 'unknown' === $out['state'] ) {
+				// The SMS may have left. Do not retry it and do not carry on blindly: stop and let the owner look.
+				$res['unknown']++;
+				$res['error'] = $out['error'];
+				break;
 			} else {
 				$res['failed']++;
-				$res['error'] = $err;
+				$res['error'] = $out['error'];
 				if ( $res['failed'] >= 3 ) { // do not hammer a broken gateway.
 					break;
 				}
@@ -404,12 +571,16 @@ class CRDR_Playbooks {
 			return;
 		}
 		set_transient( self::LOCK, 1, 5 * MINUTE_IN_SECONDS );
-		foreach ( self::all() as $id => $pb ) {
-			if ( 'auto' === $pb['mode'] ) {
-				self::run( $id, 25 );
+		try {
+			CRDR_Send::recover_stale();
+			foreach ( self::all() as $id => $pb ) {
+				if ( 'auto' === $pb['mode'] ) {
+					self::run( $id, 25, array( 'trigger' => 'cron' ) );
+				}
 			}
+		} finally {
+			delete_transient( self::LOCK );
 		}
-		delete_transient( self::LOCK );
 	}
 
 	/* ---------------------------------------------------------------- results */

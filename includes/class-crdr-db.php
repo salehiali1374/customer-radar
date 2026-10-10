@@ -7,11 +7,15 @@ defined( 'ABSPATH' ) || exit;
  *  - crdr_orders      : slim copy of counted orders (rebuilt on every sync)
  *  - crdr_order_items : products per order, used for cross-sell analysis (rebuilt on every sync)
  *  - crdr_contacts    : every contact attempt (sms / call / skip / opt-out) incl. holdout rows;
- *                       keyed by customer key, so it survives rebuilds
+ *                       keyed by customer key, so it survives rebuilds.
+ *                       An SMS is first CLAIMED (status 'pending', claim_key set, UNIQUE) and only then sent;
+ *                       claim_key is cleared when the outcome is recorded, so at most one send per customer
+ *                       can be in flight. status: pending | ok | failed | unknown | holdout | norec.
+ *                       'unknown' = the gateway may have accepted the SMS (timeout); it counts as contacted.
  */
 class CRDR_DB {
 
-	const DB_VERSION = '2';
+	const DB_VERSION = '3';
 
 	public static function customers() {
 		global $wpdb;
@@ -102,7 +106,11 @@ class CRDR_DB {
 			error varchar(255) NOT NULL DEFAULT '',
 			created_ts int(10) unsigned NOT NULL DEFAULT 0,
 			user_id bigint(20) unsigned NOT NULL DEFAULT 0,
+			run_id varchar(32) NOT NULL DEFAULT '',
+			localid varchar(24) NOT NULL DEFAULT '',
+			claim_key varchar(100) DEFAULT NULL,
 			PRIMARY KEY  (id),
+			UNIQUE KEY claim_key (claim_key),
 			KEY ckey_kind (ckey, kind, created_ts),
 			KEY pb (playbook, created_ts)
 		) {$charset};" );
@@ -141,8 +149,9 @@ class CRDR_DB {
 				'error'      => isset( $a['error'] ) ? mb_substr( $a['error'], 0, 255 ) : '',
 				'created_ts' => time(),
 				'user_id'    => get_current_user_id(),
+				'run_id'     => isset( $a['run_id'] ) ? substr( (string) $a['run_id'], 0, 32 ) : '',
 			),
-			array( '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%d' )
+			array( '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%d', '%s' )
 		);
 	}
 
@@ -157,7 +166,38 @@ class CRDR_DB {
 				"NOT EXISTS (SELECT 1 FROM {$k} y WHERE y.ckey = {$alias}.ckey AND y.kind IN ('sms','called','skip') AND y.status <> 'failed' AND y.created_ts > %d)", // phpcs:ignore WordPress.DB.PreparedSQL
 				time() - $days * DAY_IN_SECONDS
 			);
+		} else {
+			// "0 days" must not mean "message the same people again on every run": keep a fixed safety floor for SMS.
+			$out[] = $wpdb->prepare(
+				"NOT EXISTS (SELECT 1 FROM {$k} y WHERE y.ckey = {$alias}.ckey AND y.kind = 'sms' AND y.status <> 'failed' AND y.created_ts > %d)", // phpcs:ignore WordPress.DB.PreparedSQL
+				time() - CRDR_Send_Rules::MIN_RESEND
+			);
 		}
 		return $out;
+	}
+
+	/**
+	 * The same rules as exclusions_sql(), asked about one customer. Used right after an SMS is claimed,
+	 * because the audience may have been selected a while earlier.
+	 *
+	 * @param int $exclude_id contact row to ignore (the claim being checked)
+	 * @return string '' when the customer may be messaged, otherwise 'optout' or 'cooldown'
+	 */
+	public static function blocked_reason( $ckey, $exclude_id = 0, $cooldown_days = null ) {
+		global $wpdb;
+		$k = self::contacts();
+		if ( $wpdb->get_var( $wpdb->prepare( "SELECT 1 FROM {$k} WHERE ckey = %s AND kind = 'optout' LIMIT 1", $ckey ) ) ) { // phpcs:ignore WordPress.DB.PreparedSQL
+			return 'optout';
+		}
+		$days  = null === $cooldown_days ? (int) CRDR_Settings::get( 'cooldown_days' ) : (int) $cooldown_days;
+		$kinds = $days > 0 ? "'sms','called','skip'" : "'sms'";
+		$since = time() - ( $days > 0 ? $days * DAY_IN_SECONDS : CRDR_Send_Rules::MIN_RESEND );
+		$hit   = $wpdb->get_var( $wpdb->prepare(
+			"SELECT 1 FROM {$k} WHERE ckey = %s AND kind IN ({$kinds}) AND status <> 'failed' AND id <> %d AND created_ts > %d LIMIT 1", // phpcs:ignore WordPress.DB.PreparedSQL
+			$ckey,
+			(int) $exclude_id,
+			$since
+		) );
+		return $hit ? 'cooldown' : '';
 	}
 }

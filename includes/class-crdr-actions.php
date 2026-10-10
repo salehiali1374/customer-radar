@@ -63,32 +63,30 @@ class CRDR_Actions {
 		return $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . CRDR_DB::customers() . ' WHERE ckey = %s', $ckey ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL
 	}
 
-	/** Contacted recently (sms / call / skip) or opted out. */
+	/** Contacted recently (sms / call / skip) or opted out. Returns 'optout', true (cooldown) or false. */
 	public static function in_cooldown( $ckey ) {
-		global $wpdb;
-		$k = CRDR_DB::contacts();
-		if ( $wpdb->get_var( $wpdb->prepare( "SELECT 1 FROM {$k} WHERE ckey = %s AND kind = 'optout' LIMIT 1", $ckey ) ) ) { // phpcs:ignore WordPress.DB.PreparedSQL
-			return 'optout';
-		}
-		$days = (int) CRDR_Settings::get( 'cooldown_days' );
-		if ( $days <= 0 ) {
-			return false;
-		}
-		return (bool) $wpdb->get_var( $wpdb->prepare(
-			"SELECT 1 FROM {$k} WHERE ckey = %s AND kind IN ('sms','called','skip') AND status <> 'failed' AND created_ts > %d LIMIT 1", // phpcs:ignore WordPress.DB.PreparedSQL
-			$ckey,
-			time() - $days * DAY_IN_SECONDS
-		) );
+		$why = CRDR_DB::blocked_reason( $ckey );
+		return 'optout' === $why ? 'optout' : ( '' !== $why );
 	}
 
-	public static function render_template( $tpl, array $customer, array $extra = array() ) {
+	/**
+	 * Fill a template for one customer and report whether every placeholder got a value.
+	 * Use this wherever a message is about to be SENT: render['ok'] false means do not send.
+	 */
+	public static function render_checked( $tpl, array $customer, array $extra = array() ) {
 		$name = trim( (string) $customer['name'] );
 		$vars = array_merge( array(
 			'{name}'   => '' !== $name ? $name : 'مشتری',
 			'{store}'  => wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES ),
 			'{optout}' => (string) CRDR_Settings::get( 'optout_text' ),
 		), $extra );
-		return strtr( $tpl, $vars );
+		return CRDR_Template::render( $tpl, $vars );
+	}
+
+	/** Text only (kept for callers that just display a preview); never use it to decide what to send. */
+	public static function render_template( $tpl, array $customer, array $extra = array() ) {
+		$r = self::render_checked( $tpl, $customer, $extra );
+		return $r['text'];
 	}
 
 	/** Create a single-use percentage coupon for this customer. Returns [code, expire_ts]. */
@@ -116,7 +114,9 @@ class CRDR_Actions {
 		}
 		$c->set_description( 'ساخته‌شده توسط رادار مشتری برای ' . $customer['ckey'] );
 		$c->update_meta_data( '_crdr_ckey', $customer['ckey'] );
-		$c->save();
+		if ( ! $c->save() ) {
+			throw new RuntimeException( 'کد تخفیف ذخیره نشد.' ); // callers treat this as "nothing sent".
+		}
 		return array( $code, $expire );
 	}
 
@@ -130,7 +130,11 @@ class CRDR_Actions {
 		}
 		$with_coupon = ! empty( $_POST['coupon'] );
 		$tpl         = CRDR_Settings::get( $with_coupon ? 'sms_template_coupon' : 'sms_template' );
-		$extra       = array();
+		$problems    = CRDR_Template::validate( $tpl, array( 'offer' => $with_coupon ) );
+		if ( $problems ) {
+			wp_send_json_error( array( 'message' => 'متن پیامک در «تنظیمات» معتبر نیست: ' . $problems[0] ) );
+		}
+		$extra = array();
 		if ( $with_coupon ) {
 			$extra = array(
 				'{coupon}'   => 'XXXXXXXX',
@@ -173,26 +177,49 @@ class CRDR_Actions {
 			wp_send_json_error( array( 'message' => 'با این مشتری به‌تازگی تماس گرفته شده است.' ) );
 		}
 
-		$extra = array();
-		$tpl   = CRDR_Settings::get( 'sms_template' );
-		$code  = '';
-		if ( 'sms_coupon' === $type ) {
-			list( $code, $expire ) = self::make_coupon( $cust );
-			$tpl   = CRDR_Settings::get( 'sms_template_coupon' );
-			$extra = array(
-				'{coupon}'   => $code,
-				'{discount}' => CRDR_Jalali::digits( (string) CRDR_Settings::get( 'coupon_percent' ) ),
-				'{expire}'   => CRDR_Jalali::date( $expire ),
-			);
+		$with_coupon = 'sms_coupon' === $type;
+		$tpl         = CRDR_Settings::get( $with_coupon ? 'sms_template_coupon' : 'sms_template' );
+		$problems    = CRDR_Template::validate( $tpl, array( 'offer' => $with_coupon ) );
+		if ( $problems ) { // nothing is claimed, no coupon is created, nothing is sent.
+			wp_send_json_error( array( 'message' => 'متن پیامک در «تنظیمات» معتبر نیست: ' . $problems[0] ) );
 		}
-		$message          = self::render_template( $tpl, $cust, $extra );
-		list( $ok, $err ) = CRDR_SMS::send( $cust['phone'], $message );
-		CRDR_DB::add_contact( $cust['ckey'], 'sms', array(
-			'playbook' => 'manual', 'coupon' => $code, 'message' => $message,
-			'status'   => $ok ? 'ok' : 'failed', 'error' => $ok ? '' : $err,
-		) );
-		if ( ! $ok ) {
-			wp_send_json_error( array( 'message' => $err ) );
+
+		// Claim the customer first: a double click or a campaign running at the same moment cannot send twice.
+		$claim = CRDR_Send::claim( $cust['ckey'], 'manual', bin2hex( random_bytes( 8 ) ) );
+		if ( isset( $claim['skip'] ) ) {
+			$why = array(
+				'busy'     => 'ارسال برای این مشتری هم‌اکنون در حال انجام است.',
+				'optout'   => 'این مشتری درخواست نکردن پیام داده است.',
+				'cooldown' => 'با این مشتری به‌تازگی تماس گرفته شده است.',
+				'error'    => 'ثبت وضعیت ارسال ممکن نشد؛ برای جلوگیری از پیام تکراری، پیامکی فرستاده نشد.',
+			);
+			wp_send_json_error( array( 'message' => $why[ $claim['skip'] ] ) );
+		}
+		$row   = $claim['id'];
+		$extra = array();
+		$code  = '';
+		try {
+			if ( $with_coupon ) {
+				list( $code, $expire ) = self::make_coupon( $cust );
+				$extra = array(
+					'{coupon}'   => $code,
+					'{discount}' => CRDR_Jalali::digits( (string) CRDR_Settings::get( 'coupon_percent' ) ),
+					'{expire}'   => CRDR_Jalali::date( $expire ),
+				);
+			}
+		} catch ( \Throwable $e ) {
+			CRDR_Send::finalize( $row, 'failed', 'ساخت کد تخفیف ناموفق بود.' );
+			wp_send_json_error( array( 'message' => 'ساخت کد تخفیف ناموفق بود؛ پیامکی فرستاده نشد.' ) );
+		}
+		$render = self::render_checked( $tpl, $cust, $extra );
+		if ( ! $render['ok'] ) {
+			$why = CRDR_Template::explain( $render );
+			CRDR_Send::finalize( $row, 'failed', $why );
+			wp_send_json_error( array( 'message' => $why . ' پیامکی فرستاده نشد.' ) );
+		}
+		$out = CRDR_Send::send_claimed( $row, $cust['phone'], $render['text'], $code );
+		if ( 'sent' !== $out['state'] ) {
+			wp_send_json_error( array( 'message' => $out['error'] ) );
 		}
 		wp_send_json_success( array( 'message' => 'پیامک ارسال شد.' ) );
 	}
@@ -216,14 +243,22 @@ class CRDR_Actions {
 	public static function ajax_pb_run() {
 		self::guard();
 		$id = isset( $_POST['id'] ) ? sanitize_key( $_POST['id'] ) : '';
-		wp_send_json_success( CRDR_Playbooks::run( $id, 20 ) );
+		// The browser only ASKS to override the sending hours; run() checks the capability and records it.
+		wp_send_json_success( CRDR_Playbooks::run( $id, 20, array(
+			'trigger'         => 'manual',
+			'override_window' => ! empty( $_POST['override'] ),
+		) ) );
 	}
 
 	public static function ajax_pb_mode() {
 		self::guard();
 		$id   = isset( $_POST['id'] ) ? sanitize_key( $_POST['id'] ) : '';
 		$mode = isset( $_POST['mode'] ) ? sanitize_key( $_POST['mode'] ) : 'off';
-		if ( ! CRDR_Playbooks::set_mode( $id, $mode ) ) {
+		$r    = CRDR_Playbooks::set_mode( $id, $mode );
+		if ( is_array( $r ) ) {
+			wp_send_json_error( array( 'message' => 'قبل از فعال‌سازی، متن پیام کمپین را اصلاح کنید: ' . $r[0] ) );
+		}
+		if ( ! $r ) {
 			wp_send_json_error( array( 'message' => 'کمپین پیدا نشد.' ) );
 		}
 		wp_send_json_success( array( 'mode' => $mode ) );
@@ -232,7 +267,10 @@ class CRDR_Actions {
 	public static function post_pb_save() {
 		self::guard_post();
 		$id = isset( $_POST['id'] ) ? sanitize_key( $_POST['id'] ) : '';
-		CRDR_Playbooks::save( $id, wp_unslash( $_POST ) ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+		$r  = CRDR_Playbooks::save( $id, wp_unslash( $_POST ) ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+		if ( is_array( $r ) ) { // invalid message text: nothing was saved, show the form again with the problems.
+			self::back( 'customer-radar-campaigns', array( 'edit' => $id, 'invalid' => 1 ) );
+		}
 		self::back( 'customer-radar-campaigns', array( 'saved' => $id ) );
 	}
 
@@ -301,7 +339,13 @@ class CRDR_Actions {
 
 	public static function post_save_settings() {
 		self::guard_post();
-		CRDR_Settings::save( wp_unslash( $_POST ) ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+		$in     = wp_unslash( $_POST ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+		$errors = CRDR_Settings::template_errors( CRDR_Settings::sanitize( $in ) );
+		if ( $errors ) { // nothing is saved; the submitted values come back so the person can fix them.
+			set_transient( CRDR_Settings::draft_key(), array( 'values' => CRDR_Settings::sanitize( $in ), 'errors' => $errors ), 15 * MINUTE_IN_SECONDS );
+			self::back( 'customer-radar-settings', array( 'invalid' => 1 ) );
+		}
+		CRDR_Settings::save( $in );
 		self::back( 'customer-radar-settings', array( 'saved' => 1 ) );
 	}
 

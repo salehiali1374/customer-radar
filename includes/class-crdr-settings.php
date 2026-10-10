@@ -41,6 +41,38 @@ class CRDR_Settings {
 
 	/** Validate and store the settings form. */
 	public static function save( array $in ) {
+		$out = self::sanitize( $in );
+		update_option( self::OPTION, $out, false );
+		return $out;
+	}
+
+	/** Persian problems with the two manual-SMS templates of a sanitized settings array; empty = valid. */
+	public static function template_errors( array $s ) {
+		$errors = array();
+		foreach ( array(
+			'sms_template'        => array( 'متن پیامک ساده', false ),
+			'sms_template_coupon' => array( 'متن پیامک با کد تخفیف', true ),
+		) as $key => $def ) {
+			foreach ( CRDR_Template::validate( isset( $s[ $key ] ) ? $s[ $key ] : '', array( 'offer' => $def[1] ) ) as $e ) {
+				$errors[] = $def[0] . ': ' . $e;
+			}
+		}
+		return $errors;
+	}
+
+	public static function draft_key() {
+		return 'crdr_settings_draft_' . get_current_user_id();
+	}
+
+	/** The rejected form values and their errors (one-shot), or null. */
+	public static function take_draft() {
+		$d = get_transient( self::draft_key() );
+		delete_transient( self::draft_key() );
+		return is_array( $d ) ? $d : null;
+	}
+
+	/** Clean the submitted settings form without storing anything. */
+	public static function sanitize( array $in ) {
 		$d   = self::defaults();
 		$out = array();
 
@@ -80,7 +112,6 @@ class CRDR_Settings {
 		$out['margin_pct']      = max( 1, min( 95, (int) ( $in['margin_pct'] ?? $d['margin_pct'] ) ) );
 		$out['bundle_discount'] = max( 0, min( 50, (int) ( $in['bundle_discount'] ?? $d['bundle_discount'] ) ) );
 
-		update_option( self::OPTION, $out, false );
 		return $out;
 	}
 }
