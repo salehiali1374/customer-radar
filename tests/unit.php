@@ -320,7 +320,7 @@ check( 'response: unreadable body is unknown', $cl( 200, 'not json' )[0], 'unkno
 check( 'response: empty body is unknown', $cl( 200, '' )[0], 'unknown' );
 check( 'response: an undocumented status is unknown', $cl( 200, '{"return":{"status":999}}' )[0], 'unknown' );
 check( 'response: a redirect is unknown', $cl( 302, '' )[0], 'unknown' );
-check( 'response: failure codes list matches the documented table', CRDR_Send_Rules::definite_failure_codes(), array( 400, 401, 402, 403, 411, 412, 413, 414, 417, 418, 424, 426, 428, 431, 432, 607 ) );
+check( 'response: failure codes list matches the provider\'s documented table (kavenegar.com/rest.html)', CRDR_Send_Rules::definite_failure_codes(), array( 400, 401, 402, 403, 404, 405, 406, 407, 411, 412, 413, 414, 417, 418, 422, 424, 426, 428, 431, 432, 607 ) );
 
 /* ---- localid ---- */
 check( 'localid layout (ms + 6 digits)', CRDR_Send_Rules::localid( 1790000000000, 42 ), '1790000000000000042' );
@@ -416,7 +416,56 @@ check( 'set-aside: counted from (now - 6h) when nothing was changed since', CRDR
 check( 'set-aside: a settings/campaign change AFTER that point lifts every earlier set-aside', CRDR_Send_Rules::build_backoff_since( 100000, 99000 ), 99000 );
 check( 'set-aside: an old change does not shorten the wait', CRDR_Send_Rules::build_backoff_since( 100000, 10 ), 100000 - 21600 );
 check( 'set-aside: a row made at the very moment of the change is lifted too (strictly newer only)', array( 99000 > CRDR_Send_Rules::build_backoff_since( 100000, 99000 ), 99001 > CRDR_Send_Rules::build_backoff_since( 100000, 99000 ) ), array( false, true ) );
-check( 'set-aside: "nobuild" is not a contact (listed with failed as not-contacted)', CRDR_Send_Rules::NOT_CONTACT, array( 'failed', 'nobuild' ) );
+check( 'set-aside: none of the "nothing was sent" statuses is a contact', CRDR_Send_Rules::NOT_CONTACT, array( 'failed', 'nobuild', 'retry', 'rejected' ) );
+
+/* ---- WHO is at fault for a definite failure: recipient / message / fatal / uncertain (and ambiguous = unknown) ---- */
+$sc = function ( $status ) {
+	$r = CRDR_Send_Rules::classify_response( 200, '{"return":{"status":' . $status . ',"message":"x"}}' );
+	return array( $r['state'], $r['scope'] );
+};
+check( 'scope: 411 (receptor invalid) is about the RECIPIENT only', $sc( 411 ), array( 'failed', 'recipient' ) );
+check( 'scope: 413 (message empty / too long) and 422 (unsuitable characters) are about the MESSAGE', array( $sc( 413 ), $sc( 422 ) ), array( array( 'failed', 'message' ), array( 'failed', 'message' ) ) );
+foreach ( array( 400, 401, 403, 404, 405, 406, 407, 412, 414, 417, 418, 424, 426, 428, 431, 432, 607 ) as $code ) {
+	check( "scope: $code is an account / key / credit / request problem (fatal: stop, nobody is at fault)", $sc( $code ), array( 'failed', 'fatal' ) );
+}
+check( 'scope: 402 ("operation failed") does not say why, so it is uncertain', $sc( 402 ), array( 'failed', 'uncertain' ) );
+check( 'scope: 409 ("try later") does not say it was NOT processed: stays ambiguous (unknown, never retried)', $sc( 409 ), array( 'unknown', '' ) );
+check( 'scope: a code that is not in the provider\'s table (451) is ambiguous', $sc( 451 ), array( 'unknown', '' ) );
+check( 'scope: sent has no scope', CRDR_Send_Rules::classify_response( 200, '{"return":{"status":200}}' )['scope'], '' );
+check( 'scope: every documented definite code has exactly one scope', array_values( array_unique( array_map( function ( $c ) {
+	return CRDR_Send_Rules::code_scope( $c );
+}, CRDR_Send_Rules::definite_failure_codes() ) ) ), array( 'fatal', 'uncertain', 'recipient', 'message' ) );
+check( 'scope: the scope table and the definite list never disagree', array_filter( CRDR_Send_Rules::definite_failure_codes(), function ( $c ) {
+	return '' === CRDR_Send_Rules::code_scope( $c );
+} ), array() );
+check( 'scope: an undocumented code has no scope', CRDR_Send_Rules::code_scope( 451 ), '' );
+
+check( 'failure status: recipient -> rejected', CRDR_Send_Rules::failure_status( 'recipient' ), 'rejected' );
+check( 'failure status: message -> nobuild (same set-aside as an unbuildable message)', CRDR_Send_Rules::failure_status( 'message' ), 'nobuild' );
+check( 'failure status: uncertain -> retry', CRDR_Send_Rules::failure_status( 'uncertain' ), 'retry' );
+check( 'failure status: fatal and gateway stay plain failed (the customer is not penalised)', array( CRDR_Send_Rules::failure_status( 'fatal' ), CRDR_Send_Rules::failure_status( 'gateway' ), CRDR_Send_Rules::failure_status( '' ) ), array( 'failed', 'failed', 'failed' ) );
+check( 'no status that records a failure counts as a contact', array_diff( array( 'failed', 'nobuild', 'retry', 'rejected' ), CRDR_Send_Rules::NOT_CONTACT ), array() );
+check( 'a contact status is never in the not-contact list', array_intersect( array( 'ok', 'unknown', 'pending', 'holdout' ), CRDR_Send_Rules::NOT_CONTACT ), array() );
+check( 'status names fit the varchar(10) column', max( array_map( 'strlen', CRDR_Send_Rules::NOT_CONTACT ) ) <= 10, true );
+
+foreach ( array( 411, 418, 403, 402, 413, 422 ) as $code ) {
+	$why = CRDR_Send_Rules::failure_reason( $code );
+	check( "reason $code: Persian, names the code, no provider text", 1 === preg_match( '/\p{Arabic}/u', $why ) && false !== strpos( $why, (string) $code ), true );
+}
+check( 'reason: an unlisted code still gets a safe text with its number', false !== strpos( CRDR_Send_Rules::failure_reason( 999 ), '999' ), true );
+
+/* ---- nothing sensitive in a stored error ---- */
+check( 'redact: the API key is removed wherever it appears', CRDR_Send_Rules::redact( 'GET https://api.kavenegar.com/v1/SECRETKEY123/sms/send.json failed', array( 'SECRETKEY123' ) ), 'GET https://api.kavenegar.com/v1/***/sms/send.json failed' );
+check( 'redact: Iranian mobile numbers in all common spellings are removed', CRDR_Send_Rules::redact( 'to 09123456789, +989123456789, 00989123456789, 9123456789 end', array() ), 'to [شماره], [شماره], [شماره], [شماره] end' );
+check( 'redact: an empty or very short secret is ignored (it would blank the text)', CRDR_Send_Rules::redact( 'abc', array( '', 'ab' ) ), 'abc' );
+check( 'redact: ordinary numbers (codes, counts) are left alone', CRDR_Send_Rules::redact( 'کد 411 و 20001 میلی‌ثانیه', array() ), 'کد 411 و 20001 میلی‌ثانیه' );
+check( 'redact: Persian digits in a phone number are removed too', CRDR_Send_Rules::redact( 'شماره ۰۹۱۲۳۴۵۶۷۸۹ نامعتبر', array() ), 'شماره [شماره] نامعتبر' );
+
+/* ---- how long a rejected recipient stays aside ---- */
+check( 'rejected: set aside for 30 days unless something lifts it', CRDR_Send_Rules::REJECT_BACKOFF, 30 * 86400 );
+check( 'rejected: counted from (now - 30 days) when nobody pressed "retry"', CRDR_Send_Rules::reject_backoff_since( 5000000, 0 ), 5000000 - 30 * 86400 );
+check( 'rejected: pressing "retry" later lifts every earlier rejection', CRDR_Send_Rules::reject_backoff_since( 5000000, 4900000 ), 4900000 );
+check( 'rejected: an old "retry" does not shorten the wait', CRDR_Send_Rules::reject_backoff_since( 5000000, 1000 ), 5000000 - 30 * 86400 );
 
 echo "\n$pass passed, $fail failed\n";
 exit( $fail ? 1 : 0 );

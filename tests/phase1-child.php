@@ -40,6 +40,17 @@ switch ( $job ) {
 		echo wp_json_encode( $out ) . "\n";
 		break;
 
+	case 'retry_rejected': // the admin-post handler "retry rejected numbers": args user id, good|bad nonce, campaign id
+		wp_set_current_user( (int) $args[0] );
+		$_POST = $_REQUEST = array( 'id' => $args[2], '_wpnonce' => 'good' === $args[1] ? wp_create_nonce( CRDR_Actions::NONCE ) : 'bad' );
+		add_filter( 'wp_redirect', function ( $loc ) use ( $args ) {
+			echo wp_json_encode( array( 'redirect' => $loc, 'epoch' => CRDR_Send::reject_epoch( $args[2] ) ) ) . "\n";
+			exit( 0 );
+		} );
+		CRDR_Actions::post_retry_rejected();
+		echo wp_json_encode( array( 'error' => 'no redirect' ) ) . "\n";
+		break;
+
 	case 'crash': // claim, talk to the gateway, then die before the outcome is recorded
 		$c     = CRDR_Actions::customer_by_key( $args[0] );
 		$claim = CRDR_Send::claim( $c['ckey'], 'dormant', 'crash' );

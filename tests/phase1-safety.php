@@ -47,6 +47,8 @@ function crdr_t_reset( $customers = 10 ) {
 	delete_option( CRDR_Send::LOG_OPTION );
 	delete_option( CRDR_Send::CRON_LOG_OPTION );
 	delete_option( CRDR_Send::LOST_OPTION );
+	delete_option( CRDR_Send::EPOCH_OPTION );         // "lift the set-aside" times belong to the scenario that set them
+	delete_option( CRDR_Send::REJECT_EPOCH_OPTION );
 	@unlink( crdr_t_log_path() );
 	wp_set_current_user( 1 );
 	$now = time();
@@ -837,6 +839,206 @@ remove_all_filters( 'wp_insert_post_empty_content' );
 $GLOBALS['crdr_t_bad'] = array();
 crdr_t_reset( 0 );
 
+/* ====== B4. what the gateway says decides WHO is set aside: recipient / message / nobody ====== */
+echo "== gateway failures by cause\n";
+$gw = function ( array $by_phone = array(), $mode = 'ok', $n = 12 ) {
+	crdr_t_cfg( array(), array(), array( 'mode' => $mode, 'by_phone' => $by_phone ) );
+	crdr_t_reset( $n );
+};
+$phone = function ( $i ) {
+	return sprintf( '09120000%03d', $i );
+};
+$mockset = function ( array $by_phone = array(), $mode = 'ok' ) {
+	update_option( 'crdr_t_mock', wp_json_encode( array( 'mode' => $mode, 'by_phone' => $by_phone ) ) );
+};
+$per_phone = function () {
+	$by = array_count_values( array_column( crdr_t_requests(), 'receptor' ) );
+	return $by;
+};
+$st = function ( $status ) {
+	return crdr_t_count( "status = '{$status}'" );
+};
+$save_campaign = function () {
+	CRDR_Playbooks::save( 'dormant', array( 'name' => 'خواب', 'mode' => 'manual', 'template' => 'سلام {name}', 'offer_type' => 'none', 'daily_cap' => 100 ) );
+};
+$no_pii = function ( $text ) {
+	return false === strpos( $text, '0912' ) && false === strpos( $text, 'TESTKEY' ) && false === strpos( $text, 'ECHO' ) && false === mb_strpos( $text, 'سلام' );
+};
+
+// ---- 1. a permanently invalid recipient (411) ----------------------------------------------------------------------
+$bad5 = array();
+foreach ( range( 1, 5 ) as $i ) {
+	$bad5[ $phone( $i ) ] = 'invalid_receptor';
+}
+$gw( $bad5, 'ok', 12 );
+$r1 = CRDR_Playbooks::run( 'dormant', 8 );
+t( 'recipient rejected (411): five rejected customers at the very top do NOT stop the run (the old rule stopped after 3)', 5 === $r1['failed'] && 3 === $r1['sent'], wp_json_encode( $r1, JSON_UNESCAPED_UNICODE ) );
+t( 'recipient rejected: one row each, status "rejected", with the provider code in a Persian reason', 5 === $st( 'rejected' ) && 5 === count( array_filter( array_column( crdr_t_rows( "status = 'rejected'" ), 'error' ), function ( $e ) {
+	return false !== strpos( $e, '411' ) && 1 === preg_match( '/\p{Arabic}/u', $e );
+} ) ) );
+t( 'recipient rejected: the reason holds no phone number, key or message text', 5 === count( array_filter( array_column( crdr_t_rows( "status = 'rejected'" ), 'error' ), $no_pii ) ) );
+t( 'recipient rejected: no false contact: no ok/pending/unknown row, no claim left, not in cooldown, daily cap untouched', 0 === crdr_t_count( "status IN ('ok','pending','unknown') AND ckey IN ('p:09120000001','p:09120000005')" ) && 0 === crdr_t_count( 'claim_key IS NOT NULL' ) && '' === CRDR_DB::blocked_reason( 'p:09120000001' ) && false === CRDR_Actions::in_cooldown( 'p:09120000003' ) && 3 === CRDR_Playbooks::sent_today( 'dormant' ) );
+$r2 = CRDR_Playbooks::run( 'dormant', 8 );
+t( 'audience progress: the next run skips the rejected five and serves the rest', 4 === $r2['sent'] && 0 === $r2['failed'], wp_json_encode( $r2, JSON_UNESCAPED_UNICODE ) );
+$r3 = CRDR_Playbooks::run( 'dormant', 8 );
+t( 'nothing left to do: no resend, no new failures', 0 === $r3['sent'] && 0 === $r3['failed'] );
+$by = $per_phone();
+t( 'duplicate-send safety: every rejected number was tried exactly once, every served customer exactly once', 12 === count( $by ) && 12 === array_sum( $by ) && 7 === crdr_t_count( "status = 'ok'" ) );
+$html = crdr_t_page( array( 'CRDR_Page_Campaigns', 'render' ), array( 'page' => 'customer-radar-campaigns' ) );
+t( 'campaign card: says how many numbers were rejected, why, and offers an explicit "try again" form (nonce, POST)', false !== mb_strpos( $html, 'رد شده' ) && false !== strpos( $html, 'crdr_retry_rejected' ) && false !== strpos( $html, '_wpnonce' ) && false === strpos( $html, '0912' ) && false === strpos( $html, 'TESTKEY' ) );
+$cid1 = (int) $wpdb->get_var( 'SELECT id FROM ' . CRDR_DB::customers() . " WHERE ckey = 'p:09120000001'" );
+$html = crdr_t_page( array( 'CRDR_Page_Customers', 'render_detail' ), array( 'page' => 'customer-radar-customer', 'id' => $cid1 ) );
+t( 'customer page: shows the rejection in Persian', false !== mb_strpos( $html, 'رد شد' ) && false !== strpos( $html, '411' ) );
+
+// recovery A: the number is corrected in the order -> it is a different customer key, so it is simply served
+$wpdb->insert( CRDR_DB::customers(), array( 'ckey' => 'p:09129990001', 'name' => 'اصلاح‌شده', 'phone' => '09129990001', 'email' => '', 'orders_count' => 1, 'total_spent' => 1, 'first_ts' => time() - 90 * 86400, 'last_ts' => time() - 90 * 86400, 'segment' => 'hibernating', 'priority' => 99 ) );
+$r = CRDR_Playbooks::run( 'dormant', 8 );
+t( 'recovery: a corrected number is a new customer (key = phone) and is served at once; the old ones stay aside', 1 === $r['sent'] && 5 === $st( 'rejected' ) && 1 === ( $per_phone()['09129990001'] ?? 0 ) );
+// the provider now accepts them, but nothing retries by itself ...
+$mockset();
+$n0 = count( crdr_t_requests() );
+$r  = CRDR_Playbooks::run( 'dormant', 20 );
+t( 'recovery: without an explicit action the rejected numbers are NOT hammered again', 0 === $r['sent'] && $n0 === count( crdr_t_requests() ) );
+// ... saving the campaign / settings is for message problems, not for a bad recipient
+$save_campaign();
+CRDR_Settings::save( CRDR_Settings::all() );
+$r = CRDR_Playbooks::run( 'dormant', 20 );
+t( 'recovery: saving the campaign or the settings does not lift a recipient rejection (it is not about the text or the gateway)', 0 === $r['sent'] && 5 === $st( 'rejected' ) );
+// ... the explicit action does, and it is guarded
+$uid = wp_insert_user( array( 'user_login' => 'crdr_sub_rej_' . wp_rand(), 'user_pass' => wp_generate_password(), 'role' => 'subscriber' ) );
+$e0  = CRDR_Send::reject_epoch( 'dormant' );
+$w   = crdr_t_parallel( array( array( 'retry_rejected', (string) $uid, 'good', 'dormant' ), array( 'retry_rejected', '1', 'bad', 'dormant' ) ), 2 );
+wp_cache_delete( CRDR_Send::REJECT_EPOCH_OPTION, 'options' );
+t( 'recovery: the "try again" action refuses a user without the capability and a bad nonce (nothing changes)', $e0 === CRDR_Send::reject_epoch( 'dormant' ) && 0 === ( $w[0]['epoch'] ?? 0 ) && 0 === ( $w[1]['epoch'] ?? 0 ), wp_json_encode( $w, JSON_UNESCAPED_UNICODE ) );
+$w = crdr_t_parallel( array( array( 'retry_rejected', '1', 'good', 'dormant' ) ), 2 );
+wp_cache_delete( CRDR_Send::REJECT_EPOCH_OPTION, 'options' ); // the worker changed it in another process; this one still has the old value cached
+wp_cache_delete( 'notoptions', 'options' );
+t( 'recovery: an administrator with a valid nonce lifts it and is sent back to the campaigns page', CRDR_Send::reject_epoch( 'dormant' ) > $e0 && false !== strpos( (string) ( $w[0]['redirect'] ?? '' ), 'customer-radar-campaigns' ), wp_json_encode( $w, JSON_UNESCAPED_UNICODE ) );
+$r = CRDR_Playbooks::run( 'dormant', 20 );
+t( 'recovery: after "try again" the five are served', 5 === $r['sent'] && 0 === $r['failed'], wp_json_encode( $r, JSON_UNESCAPED_UNICODE ) );
+t( 'recovery: the rows that recorded the rejection are gone once the customer has been served', 0 === $st( 'rejected' ) );
+t( 'duplicate-send safety after recovery: 13 customers, 13 ok rows, nobody twice; the five were asked twice (rejected, then sent) and the rest once', 13 === crdr_t_count( "status = 'ok'" ) && 0 === (int) $wpdb->get_var( 'SELECT COUNT(*) FROM (SELECT ckey FROM ' . CRDR_DB::contacts() . " WHERE status = 'ok' GROUP BY ckey HAVING COUNT(*) > 1) d" ) && 2 === $per_phone()['09120000001'] && 1 === $per_phone()['09120000006'] );
+wp_delete_user( $uid );
+
+// recovery B: a long expiry as the last resort
+$gw( array( $phone( 1 ) => 'invalid_receptor' ), 'ok', 3 );
+CRDR_Playbooks::run( 'dormant', 5 );
+$mockset();
+$wpdb->query( 'UPDATE ' . CRDR_DB::contacts() . " SET created_ts = created_ts - 29 * 86400 WHERE status = 'rejected'" );
+$r = CRDR_Playbooks::run( 'dormant', 5 );
+t( 'rejected: still aside after 29 days', 0 === $r['sent'] && 1 === $st( 'rejected' ) );
+$wpdb->query( 'UPDATE ' . CRDR_DB::contacts() . " SET created_ts = created_ts - 2 * 86400 WHERE status = 'rejected'" );
+$r = CRDR_Playbooks::run( 'dormant', 5 );
+t( 'rejected: tried again after 30 days (provider-side problems can be fixed too)', 1 === $r['sent'] && 0 === $st( 'rejected' ) );
+
+// still rejected on the second attempt: one row, never a growing pile
+$gw( array( $phone( 1 ) => 'invalid_receptor' ), 'ok', 3 );
+CRDR_Playbooks::run( 'dormant', 5 );
+$wpdb->query( 'UPDATE ' . CRDR_DB::contacts() . " SET created_ts = created_ts - 31 * 86400 WHERE status = 'rejected'" );
+CRDR_Playbooks::run( 'dormant', 5 );
+t( 'rejected again after the expiry: still exactly one row for that customer', 1 === $st( 'rejected' ) );
+
+// ---- 2. the provider's own text is never stored or shown -------------------------------------------------------------
+$gw( array( $phone( 1 ) => 'echo' ), 'ok', 3 );
+$r = CRDR_Playbooks::run( 'dormant', 5 );
+$e = array_column( crdr_t_rows( "status = 'rejected'" ), 'error' );
+t( 'a provider answer that repeats the phone number and the API key is replaced by our own text', 1 === count( $e ) && $no_pii( $e[0] ) && false !== strpos( $e[0], '411' ) && $no_pii( $r['error'] ), wp_json_encode( $e, JSON_UNESCAPED_UNICODE ) );
+$gw( array( $phone( 1 ) => 'leaky' ), 'ok', 3 );
+$r = CRDR_Playbooks::run( 'dormant', 5 );
+$e = array_column( crdr_t_rows( "status = 'unknown'" ), 'error' );
+t( 'a transport error that contains the request URL (API key) and the phone number is redacted before it is stored', 1 === count( $e ) && $no_pii( $e[0] ) && false !== mb_strpos( $e[0], 'ممکن است' ) && $no_pii( $r['error'] ), wp_json_encode( $e, JSON_UNESCAPED_UNICODE ) );
+
+// ---- 3. the MESSAGE is rejected (413 / 422): same set-aside as an unbuildable message ------------------------------
+$gw( array( $phone( 1 ) => 'bad_text', $phone( 2 ) => 'bad_text', $phone( 3 ) => 'too_long' ), 'ok', 8 );
+$r = CRDR_Playbooks::run( 'dormant', 8 );
+t( 'message rejected (422, 413): set aside as "nobuild" and the other five are served in the same run', 3 === $r['failed'] && 5 === $r['sent'] && 3 === $st( 'nobuild' ) && 0 === $st( 'failed' ), wp_json_encode( $r, JSON_UNESCAPED_UNICODE ) );
+t( 'message rejected: nothing counts as contacted', '' === CRDR_DB::blocked_reason( 'p:09120000001' ) && 5 === crdr_t_count( "status = 'ok'" ) );
+$mockset();
+$r = CRDR_Playbooks::run( 'dormant', 8 );
+t( 'message rejected: not retried straight away', 0 === $r['sent'] );
+$save_campaign();
+$r = CRDR_Playbooks::run( 'dormant', 8 );
+t( 'message rejected: saving the campaign (a fixed text) lifts it', 3 === $r['sent'] && 0 === $st( 'nobuild' ) );
+
+// ---- 4. nobody is at fault: credit, key ----------------------------------------------------------------------------------
+foreach ( array( 'credit' => '418', 'bad_key' => '403' ) as $mode => $code ) {
+	$gw( array(), $mode, 6 );
+	$r = CRDR_Playbooks::run( 'dormant', 6 );
+	t( "gateway-wide ({$code}): the run stops at the FIRST failure, one request only", 1 === $r['failed'] && 1 === count( crdr_t_requests() ) && false !== strpos( $r['error'], $code ) );
+	$mockset();
+	$r = CRDR_Playbooks::run( 'dormant', 6 );
+	t( "gateway-wide ({$code}): the customer was not penalised: once fixed the SAME run order serves everybody, customer 1 first", 6 === $r['sent'] && 2 === $per_phone()['09120000001'] );
+}
+
+// ---- 5. transient network failure: breaker only for failures IN A ROW, nobody set aside -----------------------------------------
+$gw( array( $phone( 1 ) => 'connect_fail', $phone( 3 ) => 'connect_fail', $phone( 5 ) => 'connect_fail' ), 'ok', 8 );
+$r = CRDR_Playbooks::run( 'dormant', 8 );
+t( 'transient failures separated by successes do not trip the breaker (3 failed, 5 sent in one run)', 3 === $r['failed'] && 5 === $r['sent'], wp_json_encode( $r, JSON_UNESCAPED_UNICODE ) );
+t( 'transient failures: plain "failed" rows, nobody set aside, nobody contacted', 3 === $st( 'failed' ) && 0 === $st( 'nobuild' ) + $st( 'retry' ) + $st( 'rejected' ) && '' === CRDR_DB::blocked_reason( 'p:09120000003' ) );
+$mockset();
+$r = CRDR_Playbooks::run( 'dormant', 8 );
+t( 'transient failures: retried at the next run (the retry path), each exactly once', 3 === $r['sent'] );
+$gw( array(), 'connect_fail', 8 );
+$r = CRDR_Playbooks::run( 'dormant', 8 );
+t( 'broadly broken gateway: three in a row stop the run (circuit breaker), nobody set aside', 3 === $r['failed'] && 0 === $r['sent'] && 3 === count( array_filter( array_column( crdr_t_rows(), 'status' ), function ( $x ) {
+	return 'failed' === $x;
+} ) ) && 0 === $st( 'retry' ) );
+$mockset();
+$r = CRDR_Playbooks::run( 'dormant', 8 );
+t( 'broadly broken gateway: back to normal at the next run', 8 === $r['sent'] );
+
+// ---- 6. unclear cause (402): a short, bounded set-aside so later customers still progress ----------------------------------------
+$gw( array( $phone( 1 ) => 'op_failed', $phone( 2 ) => 'op_failed', $phone( 3 ) => 'op_failed' ), 'ok', 10 );
+$r1 = CRDR_Playbooks::run( 'dormant', 8 );
+t( 'unclear failure (402) x3 at the top: the breaker trips, the three are set aside as "retry"', 3 === $r1['failed'] && 0 === $r1['sent'] && 3 === $st( 'retry' ) && 0 === $st( 'rejected' ), wp_json_encode( $r1, JSON_UNESCAPED_UNICODE ) );
+$r2 = CRDR_Playbooks::run( 'dormant', 8 );
+t( 'unclear failure: the NEXT run goes past them and serves the others (progress is guaranteed)', 7 === $r2['sent'] && 0 === $r2['failed'], wp_json_encode( $r2, JSON_UNESCAPED_UNICODE ) );
+t( 'unclear failure: not contacted, not in cooldown', '' === CRDR_DB::blocked_reason( 'p:09120000002' ) && 7 === crdr_t_count( "status = 'ok'" ) );
+$mockset();
+$r = CRDR_Playbooks::run( 'dormant', 8 );
+t( 'unclear failure: not hammered again right away', 0 === $r['sent'] );
+$save_campaign();
+$r = CRDR_Playbooks::run( 'dormant', 8 );
+t( 'unclear failure: lifted by saving the campaign/settings (the explicit recovery) and served once', 3 === $r['sent'] && 0 === $st( 'retry' ) );
+$gw( array( $phone( 1 ) => 'op_failed' ), 'ok', 4 );
+CRDR_Playbooks::run( 'dormant', 8 );
+$mockset();
+$wpdb->query( 'UPDATE ' . CRDR_DB::contacts() . " SET created_ts = created_ts - 25000 WHERE status = 'retry'" );
+$r = CRDR_Playbooks::run( 'dormant', 8 );
+t( 'unclear failure: or by waiting out six hours', 1 === $r['sent'] && 0 === $st( 'retry' ) );
+$gw( array( $phone( 2 ) => 'op_failed' ), 'ok', 5 );
+$r = CRDR_Playbooks::run( 'dormant', 8 );
+t( 'one unclear failure among others does not stop the run', 1 === $r['failed'] && 4 === $r['sent'] );
+
+// ---- 7. AMBIGUOUS outcomes: never retried, counted as contacted -------------------------------------------------------------------
+foreach ( array( 'timeout' => 'timeout', 'http500' => 'HTTP 500', 'server_busy' => '409 "try later"', 'rate_limit' => '451 (not in the provider table)' ) as $mode => $label ) {
+	$gw( array( $phone( 1 ) => $mode ), 'ok', 5 );
+	$r = CRDR_Playbooks::run( 'dormant', 8 );
+	t( "ambiguous ({$label}): the run stops, the row is unknown, one request", 1 === $r['unknown'] && 0 === $r['failed'] && 1 === $st( 'unknown' ) && 1 === count( crdr_t_requests() ), wp_json_encode( $r, JSON_UNESCAPED_UNICODE ) );
+	t( "ambiguous ({$label}): counts as contacted (cooldown, daily cap)", 'cooldown' === CRDR_DB::blocked_reason( 'p:09120000001' ) && 1 === CRDR_Playbooks::sent_today( 'dormant' ) );
+	$mockset();
+	CRDR_Playbooks::run( 'dormant', 8 );
+	CRDR_Playbooks::run( 'dormant', 8 );
+	CRDR_Playbooks::save( 'dormant', array( 'name' => 'خواب', 'mode' => 'manual', 'template' => 'سلام {name}', 'offer_type' => 'none', 'daily_cap' => 100 ) );
+	CRDR_Settings::save( CRDR_Settings::all() );
+	CRDR_Playbooks::run( 'dormant', 8 );
+	t( "ambiguous ({$label}): never retried, not by later runs, not by saving, and the others were served once", 1 === $per_phone()['09120000001'] && 5 === array_sum( $per_phone() ) && 1 === $st( 'unknown' ) );
+}
+
+// ---- 8. the one-off SMS button uses the same classification ------------------------------------------------------------------------
+$gw( array( $phone( 1 ) => 'invalid_receptor' ), 'ok', 3 );
+$cid = (int) $wpdb->get_var( 'SELECT id FROM ' . CRDR_DB::customers() . " WHERE ckey = 'p:09120000001'" );
+$j   = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ) );
+t( 'one-off SMS to a rejected number: a clear Persian refusal without the number, not a contact, nothing left claimed', false === $j['success'] && false !== strpos( $j['data']['message'], '411' ) && $no_pii( $j['data']['message'] ) && 1 === $st( 'rejected' ) && 0 === crdr_t_count( 'claim_key IS NOT NULL' ) && '' === CRDR_DB::blocked_reason( 'p:09120000001' ), wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
+$mockset();
+$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ) );
+t( 'one-off SMS: a person can try again by hand after the number is fixed', true === $j['success'] && 1 === crdr_t_count( "status = 'ok'" ) );
+
+// ---- 9. the run log and health state carry only counts -------------------------------------------------------------------------------
+$dump = wp_json_encode( get_option( CRDR_Send::LOG_OPTION ) ) . wp_json_encode( get_option( CRDR_Send::CRON_LOG_OPTION ) ) . wp_json_encode( get_option( CRDR_Health::OPTION ) );
+t( 'logs and health state: no phone number and no key', false === strpos( $dump, '0912' ) && false === strpos( $dump, 'TESTKEY' ) );
+crdr_t_reset( 0 );
+
 /* ====================================================== C. duplicate sends */
 echo "== duplicate-send prevention\n";
 crdr_t_cfg();
@@ -971,7 +1173,7 @@ t( 'definite failure: those customers CAN be tried again later (nothing was sent
 crdr_t_cfg( array(), array(), array( 'mode' => 'credit' ) );
 crdr_t_reset( 5 );
 $r = CRDR_Playbooks::run( 'dormant', 5 );
-t( 'gateway says "no credit" (418): definite failure, not "unknown"', 3 === $r['failed'] && 0 === $r['unknown'] && false !== strpos( $r['error'], '418' ) );
+t( 'gateway says "no credit" (418): definite failure, not "unknown", and the run stops at the first one (nobody is at fault)', 1 === $r['failed'] && 0 === $r['unknown'] && 1 === count( crdr_t_requests() ) && false !== strpos( $r['error'], '418' ), wp_json_encode( $r, JSON_UNESCAPED_UNICODE ) );
 
 // a claim whose database record cannot be written must not send anything
 crdr_t_cfg();

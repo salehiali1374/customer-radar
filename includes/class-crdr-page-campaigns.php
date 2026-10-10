@@ -17,6 +17,9 @@ class CRDR_Page_Campaigns {
 		if ( ! empty( $_GET['saved'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification
 			CRDR_UI::notice( 'success', 'کمپین ذخیره شد.' );
 		}
+		if ( ! empty( $_GET['retried'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification
+			CRDR_UI::notice( 'success', 'شماره‌های ردشده‌ی این کمپین در اجرای بعدی دوباره امتحان می‌شوند.' );
+		}
 		if ( ! empty( $_GET['deleted'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification
 			CRDR_UI::notice( 'success', 'کمپین حذف شد.' );
 		}
@@ -56,7 +59,15 @@ class CRDR_Page_Campaigns {
 			echo CRDR_Health::card_item( $id, $pb ); // phpcs:ignore WordPress.Security.EscapeOutput -- escaped inside
 			$aside = CRDR_Playbooks::set_aside( $id );
 			if ( $aside['count'] ) {
-				echo '<li class="crdr-bad">' . esc_html( CRDR_UI::num( $aside['count'] ) ) . ' مشتری فعلاً کنار گذاشته شده‌اند، چون پیامشان ساخته نمی‌شود: ' . esc_html( $aside['reason'] ) . ' پس از اصلاح، با ذخیره‌ی کمپین یا تنظیمات (یا حداکثر ' . esc_html( CRDR_UI::num( (int) ( CRDR_Send_Rules::BUILD_BACKOFF / HOUR_IN_SECONDS ) ) ) . ' ساعت بعد) دوباره امتحان می‌شوند.</li>';
+				echo '<li class="crdr-bad">' . esc_html( CRDR_UI::num( $aside['count'] ) ) . ' مشتری فعلاً کنار گذاشته شده‌اند، چون پیامشان ساخته نمی‌شود یا سرویس پیامک آن را نپذیرفته: ' . esc_html( $aside['reason'] ) . ' پس از اصلاح، با ذخیره‌ی کمپین یا تنظیمات (یا حداکثر ' . esc_html( CRDR_UI::num( (int) ( CRDR_Send_Rules::BUILD_BACKOFF / HOUR_IN_SECONDS ) ) ) . ' ساعت بعد) دوباره امتحان می‌شوند.</li>';
+			}
+			$rej = CRDR_Playbooks::set_aside( $id, 'rejected' );
+			if ( $rej['count'] ) {
+				echo '<li class="crdr-bad">' . esc_html( CRDR_UI::num( $rej['count'] ) ) . ' شماره از سوی سرویس پیامک رد شده و کنار گذاشته شده است (پیامی برایشان نرفته و «تماس‌گرفته‌شده» حساب نمی‌شوند): ' . esc_html( $rej['reason'] )
+					. ' اگر شماره‌ی مشتری در سفارش اصلاح شود، مشتری جدیدی با همان شماره‌ی درست دیده می‌شود؛ در غیر این صورت ' . esc_html( CRDR_UI::num( (int) ( CRDR_Send_Rules::REJECT_BACKOFF / DAY_IN_SECONDS ) ) ) . ' روز بعد دوباره امتحان می‌شوند.'
+					. ' <form method="post" action="' . esc_url( admin_url( 'admin-post.php' ) ) . '" class="crdr-inline"><input type="hidden" name="action" value="crdr_retry_rejected"><input type="hidden" name="id" value="' . esc_attr( $id ) . '">';
+				wp_nonce_field( CRDR_Actions::NONCE );
+				echo '<button class="button button-small">همین حالا دوباره امتحان شوند</button></form></li>';
 			}
 			echo '</ul>';
 			echo '<p class="crdr-actions-row"><button type="button" class="button button-primary crdr-pb-open">پیش‌نمایش و اجرا</button> ';
@@ -215,7 +226,7 @@ class CRDR_Page_Campaigns {
 		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT c.*, cu.name FROM {$k} c LEFT JOIN " . CRDR_DB::customers() . " cu ON cu.ckey = c.ckey WHERE c.playbook = %s AND c.kind = 'sms' ORDER BY c.id DESC LIMIT 20", $id ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL
 		if ( $rows ) {
 			echo '<div class="crdr-card"><h3>آخرین ارسال‌ها</h3><div class="crdr-scroll"><table class="widefat striped crdr-table"><thead><tr><th>زمان</th><th>مشتری</th><th>گروه</th><th>وضعیت</th><th>پیام</th></tr></thead><tbody>';
-			$st = array( 'ok' => 'ارسال شد', 'failed' => 'ناموفق', 'nobuild' => 'پیام ساخته نشد', 'holdout' => 'شاهد', 'unknown' => 'نتیجه نامشخص (ممکن است رفته باشد)', 'pending' => 'در حال ارسال' );
+			$st = array( 'ok' => 'ارسال شد', 'failed' => 'ناموفق', 'nobuild' => 'پیام ساخته نشد یا رد شد', 'retry' => 'ناموفق (علت نامشخص؛ بعداً دوباره)', 'rejected' => 'شماره رد شد', 'holdout' => 'شاهد', 'unknown' => 'نتیجه نامشخص (ممکن است رفته باشد)', 'pending' => 'در حال ارسال' );
 			foreach ( $rows as $c ) {
 				echo '<tr><td>' . esc_html( CRDR_Jalali::date( $c['created_ts'] ) . ' ' . CRDR_Jalali::digits( wp_date( 'H:i', $c['created_ts'] ) ) ) . '</td><td>' . esc_html( $c['name'] ?: '—' ) . '</td><td>' . ( 'holdout' === $c['grp'] ? 'شاهد' : 'پیام' ) . '</td><td>' . esc_html( isset( $st[ $c['status'] ] ) ? $st[ $c['status'] ] : $c['status'] ) . ( $c['error'] ? ' — ' . esc_html( $c['error'] ) : '' ) . '</td><td class="crdr-muted">' . esc_html( $c['message'] ) . '</td></tr>';
 			}

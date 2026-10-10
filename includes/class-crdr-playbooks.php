@@ -355,19 +355,27 @@ class CRDR_Playbooks {
 	}
 
 	/**
-	 * Customers this campaign currently leaves alone because their message could not be built.
+	 * Customers this campaign currently leaves alone, by kind.
+	 *   build    the message could not be built / was refused / the provider failed without a reason (nobuild, retry)
+	 *   rejected the provider says the number is invalid
 	 *
 	 * @return array count (int), reason (the latest reason, '' when none)
 	 */
-	public static function set_aside( $id ) {
+	public static function set_aside( $id, $kind = 'build' ) {
 		global $wpdb;
-		$since = CRDR_Send_Rules::build_backoff_since( time(), (int) get_option( CRDR_Send::EPOCH_OPTION, 0 ) );
-		$k     = CRDR_DB::contacts();
-		$n     = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(DISTINCT ckey) FROM {$k} WHERE playbook = %s AND status = 'nobuild' AND created_ts > %d", $id, $since ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+		$k = CRDR_DB::contacts();
+		if ( 'rejected' === $kind ) {
+			$in    = "status = 'rejected'";
+			$since = CRDR_Send::reject_since( $id );
+		} else {
+			$in    = "status IN ('nobuild','retry')";
+			$since = CRDR_Send::build_since();
+		}
+		$n = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(DISTINCT ckey) FROM {$k} WHERE playbook = %s AND {$in} AND created_ts > %d", $id, $since ) ); // phpcs:ignore WordPress.DB.PreparedSQL
 		if ( ! $n ) {
 			return array( 'count' => 0, 'reason' => '' );
 		}
-		$why = (string) $wpdb->get_var( $wpdb->prepare( "SELECT error FROM {$k} WHERE playbook = %s AND status = 'nobuild' AND created_ts > %d ORDER BY id DESC LIMIT 1", $id, $since ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+		$why = (string) $wpdb->get_var( $wpdb->prepare( "SELECT error FROM {$k} WHERE playbook = %s AND {$in} AND created_ts > %d ORDER BY id DESC LIMIT 1", $id, $since ) ); // phpcs:ignore WordPress.DB.PreparedSQL
 		return array( 'count' => $n, 'reason' => $why );
 	}
 
@@ -502,8 +510,8 @@ class CRDR_Playbooks {
 			'SELECT * FROM ' . CRDR_DB::customers() . ' c ' . CRDR_Audience::where( self::filter( $pb ) ) . ' AND ' . CRDR_Send::not_set_aside_sql( $id ) . ' ORDER BY c.priority DESC, c.total_spent DESC LIMIT %d', // phpcs:ignore WordPress.DB.PreparedSQL
 			$take * 2
 		), ARRAY_A );
-		$streak   = 0; // build failures in a row
-		$gw_fails = 0; // gateway said "definitely not sent"
+		$streak   = 0; // build failures / refused texts in a row: probably a general cause
+		$gw_fails = 0; // failures in a row that say nothing about the customer (network, unexplained): the circuit breaker
 
 		foreach ( $rows as $cust ) {
 			if ( $res['sent'] >= $left || $res['sent'] + $res['held_out'] + $res['skipped'] + $res['failed'] >= $take ) {
@@ -565,16 +573,31 @@ class CRDR_Playbooks {
 			$out = CRDR_Send::send_claimed( $row, $cust['phone'], $msg, $code );
 			if ( 'sent' === $out['state'] ) {
 				$res['sent']++;
-				$streak = 0; // building works, so a failure further up was about that customer, not general.
+				$streak   = 0; // building and sending work, so a failure further up was about that customer, not general.
+				$gw_fails = 0;
 			} elseif ( 'unknown' === $out['state'] ) {
 				// The SMS may have left. Do not retry it and do not carry on blindly: stop and let the owner look.
 				$res['unknown']++;
 				$res['error'] = $out['error'];
 				break;
 			} else {
+				// Nothing was sent. Who is at fault decides what happens next (CRDR_SMS::deliver, CRDR_Send_Rules::code_scope):
 				$res['failed']++;
 				$res['error'] = $out['error'];
-				if ( ++$gw_fails >= 3 ) { // do not hammer a broken gateway.
+				$scope        = isset( $out['scope'] ) ? $out['scope'] : 'gateway';
+				if ( 'recipient' === $scope ) {
+					continue; // this number only: it is set aside ("rejected") and says nothing about the gateway.
+				}
+				if ( 'message' === $scope ) { // this text: set aside like an unbuildable message.
+					if ( ++$streak >= CRDR_Send_Rules::BUILD_FAIL_STREAK ) {
+						break;
+					}
+					continue;
+				}
+				if ( 'fatal' === $scope ) { // account, key, credit, request: it will fail for everybody, stop now.
+					break;
+				}
+				if ( ++$gw_fails >= 3 ) { // network trouble or an unexplained failure three times in a row: do not hammer.
 					break;
 				}
 			}

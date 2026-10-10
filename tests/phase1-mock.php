@@ -6,6 +6,10 @@
  *
  * Behaviour is chosen by the option `crdr_t_mock` (JSON):
  *   mode            ok | timeout | connect_fail | http500 | credit        (default for every phone)
+ *                   invalid_receptor (411) | bad_text (422) | too_long (413) | op_failed (402) | bad_key (403)
+ *                   server_busy (409) | rate_limit (451, not in the provider's table) | echo | leaky
+ *                   echo  = 411 whose message repeats the phone number and the API key
+ *                   leaky = a transport error whose text contains the request URL (key) and the phone number
  *   by_phone        { "09120000001": "timeout", ... }                      (per-phone override)
  *   delay_ms        pause before answering, so parallel processes really overlap
  */
@@ -64,6 +68,24 @@ if ( ! function_exists( 'crdr_t_log_path' ) ) {
 					return $reply( 500, '' );
 				case 'credit':
 					return $reply( 200, '{"return":{"status":418,"message":"اعتبار کافی نیست"}}' );
+				case 'invalid_receptor':
+					return $reply( 411, '{"return":{"status":411,"message":"شماره گیرنده پیام معتبر نمی باشد"}}' );
+				case 'bad_text':
+					return $reply( 422, '{"return":{"status":422,"message":"داده ها به دلیل وجود کاراکتر نامناسب قابل پردازش نیست"}}' );
+				case 'too_long':
+					return $reply( 413, '{"return":{"status":413,"message":"پیام خالی است و یا طول پیام بیش از حد مجاز می‌باشد"}}' );
+				case 'op_failed':
+					return $reply( 402, '{"return":{"status":402,"message":"عملیات ناموفق بود"}}' );
+				case 'bad_key':
+					return $reply( 403, '{"return":{"status":403,"message":"حساب کاربری معتبر نمی‌باشد"}}' );
+				case 'server_busy':
+					return $reply( 409, '{"return":{"status":409,"message":"سرور قادر به پاسخگوئی نیست بعدا تلاش کنید"}}' );
+				case 'rate_limit':
+					return $reply( 451, '{"return":{"status":451,"message":"too many calls"}}' );
+				case 'echo':
+					return $reply( 411, wp_json_encode( array( 'return' => array( 'status' => 411, 'message' => 'receptor ' . $phone . ' invalid, key TESTKEY' ) ) ) );
+				case 'leaky':
+					return new WP_Error( 'http_request_failed', 'cURL error 28: Operation timed out after 20001 milliseconds with 0 bytes received for ' . $url . '?receptor=' . $phone );
 			}
 			return $reply( 200, '{"return":{"status":200,"message":"تایید شد"},"entries":[{"messageid":1}]}' );
 		}, 10, 3 );

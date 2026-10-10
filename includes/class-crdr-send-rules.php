@@ -25,8 +25,18 @@ class CRDR_Send_Rules {
 	/** A run stops after this many build failures in a row (no success in between): the cause is probably general. */
 	const BUILD_FAIL_STREAK = 10;
 
-	/** Statuses that never count as "customer was contacted" (cooldown, daily cap, audience exclusion). */
-	const NOT_CONTACT = array( 'failed', 'nobuild' );
+	/**
+	 * Statuses that never count as "customer was contacted" (cooldown, daily cap, audience exclusion). All of them mean
+	 * "nothing was sent":
+	 *   failed   nobody is at fault (network, credit, key): retried at the next run
+	 *   nobuild  the message could not be built, or the provider rejected the text: set aside until saved / 6 h
+	 *   retry    the provider failed for a reason it does not explain: set aside until saved / 6 h
+	 *   rejected the provider says the RECIPIENT is invalid: set aside until a person asks again / 30 days
+	 */
+	const NOT_CONTACT = array( 'failed', 'nobuild', 'retry', 'rejected' );
+
+	/** How long a recipient the provider rejected (411) is left alone by that campaign, unless someone lifts it earlier. */
+	const REJECT_BACKOFF = 2592000;
 
 	/* ------------------------------------------------------------- when to send */
 
@@ -100,6 +110,11 @@ class CRDR_Send_Rules {
 			'override_forbidden' => 'ارسال خارج از ساعت مجاز فقط برای مدیر سایت امکان‌پذیر است.',
 		);
 		return isset( $m[ $code ] ) ? $m[ $code ] : '';
+	}
+
+	/** Rejected-recipient rows newer than this still count. @param int $epoch time someone pressed "try again" for the campaign */
+	public static function reject_backoff_since( $now, $epoch ) {
+		return max( (int) $now - self::REJECT_BACKOFF, (int) $epoch );
 	}
 
 	/** Set-aside rows newer than this still count. @param int $epoch time of the last settings/campaign change */
@@ -202,9 +217,75 @@ class CRDR_Send_Rules {
 
 	/* ------------------------------------------------- reading the gateway's answer */
 
-	/** Kavenegar status codes that mean "nothing was sent" (documented at kavenegar.com/rest.html). */
+	/**
+	 * WHO a Kavenegar status that means "nothing was sent" is about. Taken from the provider's own table
+	 * (kavenegar.com/rest.html), not guessed:
+	 *   recipient  411 the receptor number is not valid: this customer only, will not work next time either
+	 *   message    413 text empty or too long, 422 unsuitable characters: this text, not the customer's number
+	 *   fatal      account, key, credit, sender line, IP access, or a malformed request: it affects every customer
+	 *   uncertain  402 "operation failed" without a reason: cannot tell whether it is about this customer
+	 * '' = not in the table. 409 ("try later") is deliberately NOT here: it does not say the request was not
+	 * processed, so it stays ambiguous (unknown = never retried), like any code that is not documented.
+	 */
+	public static function code_scope( $status ) {
+		$map = array(
+			411 => 'recipient',
+			413 => 'message', 422 => 'message',
+			400 => 'fatal', 401 => 'fatal', 403 => 'fatal', 404 => 'fatal', 405 => 'fatal', 406 => 'fatal', 407 => 'fatal',
+			412 => 'fatal', 414 => 'fatal', 417 => 'fatal', 418 => 'fatal', 424 => 'fatal', 426 => 'fatal', 428 => 'fatal',
+			431 => 'fatal', 432 => 'fatal', 607 => 'fatal',
+			402 => 'uncertain',
+		);
+		return isset( $map[ (int) $status ] ) ? $map[ (int) $status ] : '';
+	}
+
+	/** Kavenegar status codes that mean "nothing was sent". */
 	public static function definite_failure_codes() {
-		return array( 400, 401, 402, 403, 411, 412, 413, 414, 417, 418, 424, 426, 428, 431, 432, 607 );
+		return array( 400, 401, 402, 403, 404, 405, 406, 407, 411, 412, 413, 414, 417, 418, 422, 424, 426, 428, 431, 432, 607 );
+	}
+
+	/** The contact status that records a definite failure of this scope (see NOT_CONTACT). */
+	public static function failure_status( $scope ) {
+		$map = array( 'recipient' => 'rejected', 'message' => 'nobuild', 'uncertain' => 'retry' );
+		return isset( $map[ $scope ] ) ? $map[ $scope ] : 'failed';
+	}
+
+	/**
+	 * What to tell the owner about a definite failure. Our own wording plus the code: the provider's text is never
+	 * stored or shown (it could repeat a phone number or other details).
+	 */
+	public static function failure_reason( $status ) {
+		$status = (int) $status;
+		$m      = array(
+			411 => 'شماره‌ی گیرنده از نظر سرویس پیامک معتبر نیست',
+			413 => 'متن پیامک خالی است یا از حد مجاز طولانی‌تر است',
+			422 => 'متن پیامک نویسه‌ی ناپذیرفتنی دارد',
+			401 => 'حساب سرویس پیامک غیرفعال است',
+			403 => 'کلید API یا حساب سرویس پیامک معتبر نیست',
+			412 => 'شماره‌ی خط فرستنده معتبر نیست',
+			407 => 'دسترسی مجاز نیست (آی‌پی سرور را در تنظیمات امن سرویس پیامک بررسی کنید)',
+			418 => 'اعتبار حساب سرویس پیامک کافی نیست',
+			402 => 'سرویس پیامک عملیات را انجام نداد و علتش را نگفت',
+		);
+		$why = isset( $m[ $status ] ) ? $m[ $status ] : 'سرویس پیامک درخواست را نپذیرفت';
+		return $why . ' (کاوه‌نگار، کد ' . $status . ').';
+	}
+
+	/**
+	 * Remove what must never be stored or shown from a text that came from outside: secrets (the API key) and
+	 * Iranian mobile numbers in their usual spellings (also with Persian / Arabic digits).
+	 */
+	public static function redact( $text, array $secrets = array() ) {
+		$text = (string) $text;
+		foreach ( $secrets as $secret ) {
+			$secret = (string) $secret;
+			if ( strlen( $secret ) >= 4 ) {
+				$text = str_replace( array( $secret, rawurlencode( $secret ) ), '***', $text );
+			}
+		}
+		$d    = '[0-9\x{06F0}-\x{06F9}\x{0660}-\x{0669}]';
+		$out  = preg_replace( '/(?<!' . $d . ')(?:(?:\+|00)?[9٩۹][8٨۸]|[0٠۰])?[9٩۹]' . $d . '{9}(?!' . $d . ')/u', '[شماره]', $text );
+		return null === $out ? $text : $out;
 	}
 
 	/**
@@ -236,20 +317,22 @@ class CRDR_Send_Rules {
 	/**
 	 * Interpret an HTTP answer from Kavenegar.
 	 *
-	 * @return array state (sent|failed|unknown), code (int), message (string)
+	 * @return array state (sent|failed|unknown), code (int), message (string: the provider's own text, never stored),
+	 *               scope (for a definite failure: recipient|message|fatal|uncertain, see code_scope())
 	 */
 	public static function classify_response( $http_code, $body ) {
 		$json   = json_decode( (string) $body, true );
 		$status = ( is_array( $json ) && isset( $json['return']['status'] ) ) ? (int) $json['return']['status'] : 0;
 		$msg    = ( is_array( $json ) && isset( $json['return']['message'] ) ) ? (string) $json['return']['message'] : '';
 		if ( 200 === (int) $http_code && 200 === $status ) {
-			return array( 'state' => 'sent', 'code' => 200, 'message' => $msg );
+			return array( 'state' => 'sent', 'code' => 200, 'message' => $msg, 'scope' => '' );
 		}
 		if ( $status && in_array( $status, self::definite_failure_codes(), true ) ) {
-			return array( 'state' => 'failed', 'code' => $status, 'message' => $msg );
+			return array( 'state' => 'failed', 'code' => $status, 'message' => $msg, 'scope' => self::code_scope( $status ) );
 		}
-		// 5xx, redirects, unreadable body, an unknown status: the gateway may or may not have accepted it.
-		return array( 'state' => 'unknown', 'code' => $status, 'message' => $msg );
+		// 5xx, redirects, unreadable body, a status that is not in the provider's table (or says only "try later"):
+		// the gateway may or may not have accepted it.
+		return array( 'state' => 'unknown', 'code' => $status, 'message' => $msg, 'scope' => '' );
 	}
 
 	/**

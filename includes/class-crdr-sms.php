@@ -54,16 +54,25 @@ class CRDR_SMS {
 	 *   unknown the request may have reached the gateway (timeout, dropped connection, unreadable answer):
 	 *           the SMS may well have been sent, so the caller must not retry it
 	 *
+	 * For a definite failure `scope` says who it is about, which decides what the campaign does with the customer
+	 * (see CRDR_Send_Rules::code_scope):
+	 *   recipient  this number is not valid           -> set aside until a person asks again
+	 *   message    this text was refused              -> set aside until the text/settings are saved
+	 *   fatal      account, key, credit, request      -> stop the run, nobody is penalised
+	 *   gateway    network problem before the request left -> circuit breaker after three in a row, nobody penalised
+	 *   uncertain  failed without saying why          -> set aside for a while, counts for the circuit breaker
+	 * The error text is our own wording, with keys and phone numbers removed: never the provider's raw answer.
+	 *
 	 * @param string $localid numeric id passed to Kavenegar so that a repeated request is recognised
-	 * @return array state, error (Persian text for the owner)
+	 * @return array state, error (Persian text for the owner), scope
 	 */
 	public static function deliver( $phone, $message, $localid = '' ) {
 		$phone = CRDR_Sync::normalize_phone( $phone );
 		if ( '' === $phone ) {
-			return self::result( 'failed', 'شماره موبایل معتبر نیست.' );
+			return self::result( 'failed', 'شماره موبایل مشتری معتبر نیست.', 'recipient' );
 		}
 		if ( '' === trim( $message ) ) {
-			return self::result( 'failed', 'متن پیامک خالی است.' );
+			return self::result( 'failed', 'متن پیامک خالی است.', 'message' );
 		}
 		switch ( self::provider() ) {
 			case 'pwsms':
@@ -71,11 +80,13 @@ class CRDR_SMS {
 			case 'kavenegar':
 				return self::send_kavenegar( $phone, $message, $localid );
 		}
-		return self::result( 'failed', 'سرویس پیامک تنظیم نشده است. از بخش تنظیمات یکی را انتخاب کنید.' );
+		return self::result( 'failed', 'سرویس پیامک تنظیم نشده است. از بخش تنظیمات یکی را انتخاب کنید.', 'fatal' );
 	}
 
-	private static function result( $state, $error = '' ) {
-		return array( 'state' => $state, 'error' => $error );
+	/** The one place every outcome passes through: the text is cleaned of the API key and of phone numbers. */
+	private static function result( $state, $error = '', $scope = '' ) {
+		$error = CRDR_Send_Rules::redact( $error, array( CRDR_Settings::get( 'kavenegar_key' ) ) );
+		return array( 'state' => $state, 'error' => $error, 'scope' => 'failed' === $state ? $scope : '' );
 	}
 
 	/** Owner-facing explanation of an uncertain outcome. */
@@ -85,7 +96,7 @@ class CRDR_SMS {
 
 	private static function send_pwsms( $phone, $message ) {
 		if ( ! function_exists( 'PWSMS' ) ) {
-			return self::result( 'failed', 'افزونه پیامک ووکامرس فعال نیست.' );
+			return self::result( 'failed', 'افزونه پیامک ووکامرس فعال نیست.', 'fatal' );
 		}
 		$type = class_exists( '\PW\PWSMS\Enums\EventsEnum' ) ? \PW\PWSMS\Enums\EventsEnum::BULK_SEND : 1;
 		try {
@@ -106,7 +117,8 @@ class CRDR_SMS {
 			if ( preg_match( '/time(d)?[ -]?out|cURL error (28|52|56)/i', $r ) ) {
 				return self::result( 'unknown', self::unknown_text( $r ) );
 			}
-			return self::result( 'failed', $r );
+			// A text only: it cannot tell a bad number from a broken account, so it is "uncertain" (a bounded set-aside).
+			return self::result( 'failed', $r, 'uncertain' );
 		}
 		return self::result( 'unknown', self::unknown_text( 'پاسخ نامشخص از افزونه پیامک ووکامرس' ) );
 	}
@@ -114,7 +126,7 @@ class CRDR_SMS {
 	private static function send_kavenegar( $phone, $message, $localid = '' ) {
 		$key = CRDR_Settings::get( 'kavenegar_key' );
 		if ( ! $key ) {
-			return self::result( 'failed', 'کلید API کاوه‌نگار وارد نشده است.' );
+			return self::result( 'failed', 'کلید API کاوه‌نگار وارد نشده است.', 'fatal' );
 		}
 		$body = array(
 			'receptor' => $phone,
@@ -136,7 +148,7 @@ class CRDR_SMS {
 		if ( is_wp_error( $resp ) ) {
 			$msg = $resp->get_error_message();
 			if ( 'definite' === CRDR_Send_Rules::classify_transport_error( $msg, $resp->get_error_code() ) ) {
-				return self::result( 'failed', $msg );
+				return self::result( 'failed', $msg, 'gateway' );
 			}
 			return self::result( 'unknown', self::unknown_text( $msg ) );
 		}
@@ -144,10 +156,10 @@ class CRDR_SMS {
 		if ( 'sent' === $c['state'] ) {
 			return self::result( 'sent' );
 		}
-		$msg = '' !== $c['message'] ? $c['message'] : 'پاسخ نامعتبر از کاوه‌نگار';
 		if ( 'failed' === $c['state'] ) {
-			return self::result( 'failed', 'کاوه‌نگار (' . $c['code'] . '): ' . $msg );
+			return self::result( 'failed', CRDR_Send_Rules::failure_reason( $c['code'] ), $c['scope'] );
 		}
-		return self::result( 'unknown', self::unknown_text( 'HTTP ' . (int) wp_remote_retrieve_response_code( $resp ) . ' / کاوه‌نگار (' . $c['code'] . '): ' . $msg ) );
+		// Not in the provider's table, or no readable answer: only the numbers are kept, never the provider's text.
+		return self::result( 'unknown', self::unknown_text( 'HTTP ' . (int) wp_remote_retrieve_response_code( $resp ) . ( $c['code'] ? ' / کد ' . (int) $c['code'] : ' / پاسخ ناخوانا' ) ) );
 	}
 }

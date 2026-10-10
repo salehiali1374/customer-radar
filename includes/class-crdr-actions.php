@@ -14,7 +14,7 @@ class CRDR_Actions {
 		foreach ( $ajax as $a ) {
 			add_action( 'wp_ajax_crdr_' . $a, array( __CLASS__, 'ajax_' . $a ) );
 		}
-		$post = array( 'export', 'save_settings', 'pb_save', 'pb_create', 'pb_delete', 'bundle_coupon' );
+		$post = array( 'export', 'save_settings', 'pb_save', 'pb_create', 'pb_delete', 'bundle_coupon', 'retry_rejected' );
 		foreach ( $post as $a ) {
 			add_action( 'admin_post_crdr_' . $a, array( __CLASS__, 'post_' . $a ) );
 		}
@@ -363,6 +363,16 @@ class CRDR_Actions {
 	}
 
 	/* ------------------------------------------------------------- settings */
+
+	/** "Try the rejected numbers of this campaign again": a person's explicit decision, e.g. after the provider fixed something. */
+	public static function post_retry_rejected() {
+		self::guard_post();
+		$id = isset( $_POST['id'] ) ? sanitize_key( $_POST['id'] ) : '';
+		if ( CRDR_Playbooks::get( $id ) ) {
+			CRDR_Send::reject_epoch_bump( $id );
+		}
+		self::back( 'customer-radar-campaigns', array( 'retried' => $id ) );
+	}
 
 	public static function post_save_settings() {
 		self::guard_post();

@@ -25,7 +25,8 @@ class CRDR_Send {
 	const LOG_OPTION      = 'crdr_run_log';      // runs started by people (the audit trail of overrides lives here)
 	const CRON_LOG_OPTION = 'crdr_cron_log';     // runs started by the scheduler
 	const LOST_OPTION     = 'crdr_run_log_lost'; // how many override entries had to be dropped at the cap (normally 0)
-	const EPOCH_OPTION    = 'crdr_build_epoch';  // time of the last change of settings/campaigns: lifts every "nobuild" set-aside
+	const EPOCH_OPTION    = 'crdr_build_epoch';  // time of the last change of settings/campaigns: lifts every "nobuild"/"retry" set-aside
+	const REJECT_EPOCH_OPTION = 'crdr_reject_epochs'; // campaign id => time a person asked to try its rejected numbers again
 
 	/* ------------------------------------------------------------------- run lock */
 
@@ -87,9 +88,9 @@ class CRDR_Send {
 			self::release( $id );
 			return array( 'skip' => $why );
 		}
-		// A new attempt supersedes an earlier "could not build the message": if it fails again a fresh row says so,
-		// if it works the customer is no longer listed as set aside.
-		$wpdb->query( $wpdb->prepare( 'DELETE FROM ' . CRDR_DB::contacts() . " WHERE ckey = %s AND playbook = %s AND status = 'nobuild'", $ckey, $playbook ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+		// A new attempt supersedes an earlier "set aside" record (could not build / provider refused / recipient
+		// rejected): if it fails again a fresh row says so, if it works the customer is no longer listed as set aside.
+		$wpdb->query( $wpdb->prepare( 'DELETE FROM ' . CRDR_DB::contacts() . " WHERE ckey = %s AND playbook = %s AND status IN ('nobuild','retry','rejected')", $ckey, $playbook ) ); // phpcs:ignore WordPress.DB.PreparedSQL
 		return array( 'id' => $id );
 	}
 
@@ -140,13 +141,37 @@ class CRDR_Send {
 		update_option( self::EPOCH_OPTION, time(), false );
 	}
 
+	/** Time a person last pressed "try the rejected numbers again" for this campaign (0 = never). */
+	public static function reject_epoch( $playbook ) {
+		$all = get_option( self::REJECT_EPOCH_OPTION, array() );
+		return ( is_array( $all ) && isset( $all[ $playbook ] ) ) ? (int) $all[ $playbook ] : 0;
+	}
+
+	public static function reject_epoch_bump( $playbook ) {
+		$all = get_option( self::REJECT_EPOCH_OPTION, array() );
+		$all = is_array( $all ) ? $all : array();
+		$all[ (string) $playbook ] = time();
+		update_option( self::REJECT_EPOCH_OPTION, $all, false );
+	}
+
+	/** Since when "set aside because of the text / an unexplained failure" still counts (nobuild, retry). */
+	public static function build_since() {
+		return CRDR_Send_Rules::build_backoff_since( time(), (int) get_option( self::EPOCH_OPTION, 0 ) );
+	}
+
+	/** Since when "recipient rejected by the provider" still counts for this campaign. */
+	public static function reject_since( $playbook ) {
+		return CRDR_Send_Rules::reject_backoff_since( time(), self::reject_epoch( $playbook ) );
+	}
+
 	/** SQL condition (on customers alias c): this campaign has not set the customer aside recently. */
 	public static function not_set_aside_sql( $playbook, $alias = 'c' ) {
 		global $wpdb;
 		return $wpdb->prepare(
-			'NOT EXISTS (SELECT 1 FROM ' . CRDR_DB::contacts() . " z WHERE z.ckey = {$alias}.ckey AND z.playbook = %s AND z.status = 'nobuild' AND z.created_ts > %d)", // phpcs:ignore WordPress.DB.PreparedSQL
+			'NOT EXISTS (SELECT 1 FROM ' . CRDR_DB::contacts() . " z WHERE z.ckey = {$alias}.ckey AND z.playbook = %s AND ( (z.status IN ('nobuild','retry') AND z.created_ts > %d) OR (z.status = 'rejected' AND z.created_ts > %d) ))", // phpcs:ignore WordPress.DB.PreparedSQL
 			$playbook,
-			CRDR_Send_Rules::build_backoff_since( time(), (int) get_option( self::EPOCH_OPTION, 0 ) )
+			self::build_since(),
+			self::reject_since( $playbook )
 		);
 	}
 
@@ -170,16 +195,22 @@ class CRDR_Send {
 	 */
 	public static function send_claimed( $row_id, $phone, $message, $coupon = '' ) {
 		if ( '' === trim( (string) $message ) ) {
-			self::finalize( $row_id, 'failed', 'متن پیامک خالی است.' );
-			return array( 'state' => 'failed', 'error' => 'متن پیامک خالی است.' );
+			self::finalize( $row_id, CRDR_Send_Rules::failure_status( 'message' ), 'متن پیامک خالی است.' );
+			return array( 'state' => 'failed', 'error' => 'متن پیامک خالی است.', 'scope' => 'message' );
 		}
 		$localid = CRDR_Send_Rules::localid();
 		if ( ! self::annotate( $row_id, $message, $coupon, $localid ) ) {
 			self::finalize( $row_id, 'failed', 'ثبت پیام در پایگاه‌داده ممکن نشد؛ برای جلوگیری از ارسال تکراری، پیامکی فرستاده نشد.' );
-			return array( 'state' => 'failed', 'error' => 'ثبت پیام در پایگاه‌داده ممکن نشد؛ پیامکی فرستاده نشد.' );
+			return array( 'state' => 'failed', 'error' => 'ثبت پیام در پایگاه‌داده ممکن نشد؛ پیامکی فرستاده نشد.', 'scope' => 'gateway' );
 		}
-		$r      = CRDR_SMS::deliver( $phone, $message, $localid );
-		$status = 'sent' === $r['state'] ? 'ok' : ( 'failed' === $r['state'] ? 'failed' : 'unknown' );
+		$r = CRDR_SMS::deliver( $phone, $message, $localid );
+		if ( 'sent' === $r['state'] ) {
+			$status = 'ok';
+		} elseif ( 'failed' === $r['state'] ) {
+			$status = CRDR_Send_Rules::failure_status( $r['scope'] ); // who is at fault decides how the customer is treated
+		} else {
+			$status = 'unknown'; // possibly sent: never retried
+		}
 		self::finalize( $row_id, $status, $r['error'] );
 		return $r;
 	}
