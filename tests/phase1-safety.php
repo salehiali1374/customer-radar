@@ -116,9 +116,28 @@ function crdr_t_ajax( $callable, array $post, $user = 1 ) {
 	return is_array( $j ) ? $j : array( 'success' => null, 'raw' => $raw );
 }
 
-$h_now = (int) wp_date( 'G' );
-// A window that certainly does NOT contain the current hour.
-$closed = $h_now < 12 ? array( 'send_from' => $h_now + 2, 'send_to' => $h_now + 4 ) : array( 'send_from' => $h_now - 4, 'send_to' => $h_now - 2 );
+// A pinned clock: the whole suite runs at a fixed time of day, in a fixed site timezone, so no test depends on the hour
+// (or on the timezone a previous run left in the database). The plugin reads the time through the
+// 'crdr_send_window_now' filter in CRDR_Playbooks::in_send_window(). Worker processes started by the concurrency tests
+// do not have this filter; they use windows that are always open (0..24).
+update_option( 'timezone_string', 'Asia/Tehran' );
+$GLOBALS['crdr_t_clock'] = null;
+function crdr_t_pin( $hms ) {
+	if ( $GLOBALS['crdr_t_clock'] ) {
+		remove_filter( 'crdr_send_window_now', $GLOBALS['crdr_t_clock'] );
+		$GLOBALS['crdr_t_clock'] = null;
+	}
+	if ( null !== $hms ) {
+		$ts                      = ( new DateTime( '2026-10-08 ' . $hms, new DateTimeZone( 'Asia/Tehran' ) ) )->getTimestamp();
+		$GLOBALS['crdr_t_clock'] = function () use ( $ts ) {
+			return $ts;
+		};
+		add_filter( 'crdr_send_window_now', $GLOBALS['crdr_t_clock'] );
+	}
+}
+crdr_t_pin( '03:00:00' );
+// A window that does NOT contain the pinned time (03:00 Tehran).
+$closed = array( 'send_from' => 9, 'send_to' => 21 );
 
 /* ============================================================ 0. schema */
 echo "== schema and migration\n";
@@ -342,73 +361,100 @@ t( 'ajax_pb_mode: invalid template cannot be switched on', false === $j['success
 echo "== one-off SMS: sending hours\n";
 // This action is promotional only: its text comes from the two win-back templates in Settings, it is offered on the
 // call list of lapsed customers, and it obeys opt-out and cooldown. Transactional SMS (orders) never go through it.
+// Deterministic: the clock is pinned (crdr_t_pin) and the site timezone is Asia/Tehran: nothing here depends on the real hour.
+$pin = 'crdr_t_pin';
 $coupons = function () use ( $wpdb ) {
 	return (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type = 'shop_coupon'" );
 };
-$h   = (int) wp_date( 'G' );
 $cfg = function ( $from, $to ) {
 	crdr_t_cfg( array( 'mode' => 'off' ), array( 'send_from' => $from, 'send_to' => $to, 'sms_template' => 'سلام {name}', 'sms_template_coupon' => 'سلام {name} کد {coupon} تا {expire}' ) );
 	crdr_t_reset( 3 );
 	return (int) $GLOBALS['wpdb']->get_var( 'SELECT id FROM ' . CRDR_DB::customers() . ' ORDER BY id LIMIT 1' );
 };
+$send = function ( $cid, $type = 'sms', array $more = array() ) {
+	return crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array_merge( array( 'id' => $cid, 'type' => $type ), $more ) );
+};
 
-// outside the hours
-$cid    = $cfg( $closed['send_from'], $closed['send_to'] );
-$coup0  = $coupons();
-$j      = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ) );
+// without a pinned clock the real time is used (the filter is only a seam), and real-time results do not depend on the hour here
+$pin( null );
+crdr_t_cfg( array(), array( 'send_from' => 0, 'send_to' => 24 ) );
+t( 'no pinned clock: a 0..24 window is open whatever the real time is', true === CRDR_Playbooks::in_send_window() );
+crdr_t_cfg( array(), array( 'send_from' => 5, 'send_to' => 5 ) );
+t( 'no pinned clock: a window with from == to is closed whatever the real time is', false === CRDR_Playbooks::in_send_window() );
+$pin( '03:00:00' ); // the window is 09..21
+$cid   = $cfg( 9, 21 );
+t( 'clock seam: 03:00 is outside 09..21, whatever the real time is', false === CRDR_Playbooks::in_send_window() );
+$pin( '12:00:00' );
+t( 'clock seam: 12:00 is inside 09..21', true === CRDR_Playbooks::in_send_window() );
+$pin( '03:00:00' );
+$coup0 = $coupons();
+$j     = $send( $cid );
 t( 'one-off outside hours: refused', false === $j['success'], wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
-t( 'one-off outside hours: Persian reason that names the hours', false !== mb_strpos( $j['data']['message'], 'ساعت مجاز' ) && false !== mb_strpos( $j['data']['message'], CRDR_Jalali::digits( (string) $closed['send_from'] ) ), $j['data']['message'] ?? '' );
+t( 'one-off outside hours: Persian reason that names the hours', false !== mb_strpos( $j['data']['message'], 'ساعت مجاز' ) && false !== mb_strpos( $j['data']['message'], CRDR_Jalali::digits( '9' ) ) && false !== mb_strpos( $j['data']['message'], CRDR_Jalali::digits( '21' ) ), $j['data']['message'] ?? '' );
 t( 'one-off outside hours: nothing claimed, nothing reached the gateway', 0 === crdr_t_count() && 0 === count( crdr_t_requests() ) );
-$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms_coupon' ) );
+$j = $send( $cid, 'sms_coupon' );
 t( 'one-off outside hours: coupon SMS refused too', false === $j['success'] && 0 === crdr_t_count() && 0 === count( crdr_t_requests() ) );
 t( 'one-off outside hours: no discount code is created for a blocked coupon SMS', $coup0 === $coupons() );
-$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms', 'override' => 1, 'override_window' => 1 ) );
+$j = $send( $cid, 'sms', array( 'override' => 1, 'override_window' => 1 ) );
 t( 'one-off outside hours: an administrator cannot override it (no such option)', false === $j['success'] && 0 === count( crdr_t_requests() ) );
 $j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_preview' ), array( 'id' => $cid, 'coupon' => 0 ) );
 t( 'one-off outside hours: the preview already says so (no pointless confirm box)', false === $j['success'] && false !== mb_strpos( $j['data']['message'], 'ساعت مجاز' ) );
 foreach ( array( 'called', 'skip', 'optout' ) as $type ) {
-	$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => $type, 'note' => 'x' ) );
+	$j = $send( $cid, $type, array( 'note' => 'x' ) );
 	t( "one-off outside hours: '$type' is not an SMS and still works", true === $j['success'], wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
 }
 $cid2 = (int) $wpdb->get_var( 'SELECT id FROM ' . CRDR_DB::customers() . ' ORDER BY id LIMIT 1 OFFSET 1' );
-$j    = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid2, 'type' => 'sms' ) );
+$j    = $send( $cid2 );
 t( 'one-off outside hours: a refused attempt leaves no trace, so the customer is not "contacted"', false === $j['success'] && 0 === crdr_t_count( "ckey = 'p:09120000002'" ) );
 
 // a blocked click must not use up the cooldown: once the window opens, the same customer can be messaged
-$cid = $cfg( $closed['send_from'], $closed['send_to'] );
-crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ) );
-crdr_t_cfg( array( 'mode' => 'off' ), array( 'send_from' => 0, 'send_to' => 24, 'sms_template' => 'سلام {name}' ) );
-$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ) );
-t( 'one-off: after a blocked click, the same customer can be messaged once the window opens', true === $j['success'] && 1 === count( crdr_t_requests() ) && 1 === crdr_t_count( "kind = 'sms' AND status = 'ok'" ), wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
+$cid = $cfg( 9, 21 );
+$send( $cid );
+$pin( '12:00:00' );
+$j = $send( $cid );
+t( 'one-off: after a blocked click at 03:00, the same customer can be messaged at 12:00', true === $j['success'] && 1 === count( crdr_t_requests() ) && 1 === crdr_t_count( "kind = 'sms' AND status = 'ok'" ), wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
 
-// boundaries around "now"
-$cid = $cfg( $h, $h + 1 ); // [h, h+1): the start is inclusive
-$j   = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ) );
-t( 'one-off boundary: window starting at the current hour is open', true === $j['success'] && 1 === count( crdr_t_requests() ), wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
-$cid = $cfg( 0, $h ); // [0, h): the end is exclusive (for h = 0 this is an empty window)
-$j   = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ) );
-t( 'one-off boundary: window ending at the current hour is closed', false === $j['success'] && 0 === count( crdr_t_requests() ) && 0 === crdr_t_count() );
-$cid = $cfg( $h, $h ); // from == to is always closed (unchanged behaviour)
-$j   = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ) );
-t( 'one-off boundary: from == to is closed', false === $j['success'] && 0 === count( crdr_t_requests() ) );
+// boundaries of 09..21: the start is inclusive, the end is exclusive
+foreach ( array(
+	'08:59:59' => false,
+	'09:00:00' => true,
+	'20:59:59' => true,
+	'21:00:00' => false,
+	'23:59:59' => false,
+	'00:00:00' => false,
+) as $at => $open ) {
+	$pin( $at );
+	$cid = $cfg( 9, 21 );
+	$j   = $send( $cid );
+	t( "one-off boundary: 09..21 at {$at} is " . ( $open ? 'open' : 'closed' ), $open === ( true === $j['success'] ) && ( $open ? 1 : 0 ) === count( crdr_t_requests() ), wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
+}
+$pin( '09:00:00' );
+$cid = $cfg( 9, 9 ); // from == to is always closed (unchanged behaviour)
+$j   = $send( $cid );
+t( 'one-off boundary: from == to is closed even at that hour', false === $j['success'] && 0 === count( crdr_t_requests() ) );
+$pin( '03:00:00' );
 $cid = $cfg( 0, 24 );
-$j   = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms_coupon' ) );
-t( 'one-off boundary: 0..24 is always open, coupon SMS goes out', true === $j['success'] && 1 === count( crdr_t_requests() ) && 1 === crdr_t_count( "coupon <> '' AND status = 'ok'" ), wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
+$j   = $send( $cid, 'sms_coupon' );
+t( 'one-off boundary: 0..24 is open at 03:00, coupon SMS goes out', true === $j['success'] && 1 === count( crdr_t_requests() ) && 1 === crdr_t_count( "coupon <> '' AND status = 'ok'" ), wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
 
 // overnight window: not supported, so it blocks every hour (same as campaigns); the message shows the hours so it is discoverable
-$cid = $cfg( 22, 6 );
-$j   = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ) );
-t( 'one-off overnight window (22..6): blocked at any hour, hours shown in the message', false === $j['success'] && 0 === count( crdr_t_requests() ) && false !== mb_strpos( $j['data']['message'], CRDR_Jalali::digits( '22' ) ) && false !== mb_strpos( $j['data']['message'], CRDR_Jalali::digits( '6' ) ), wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
+foreach ( array( '23:00:00', '03:00:00', '12:00:00' ) as $at ) {
+	$pin( $at );
+	$cid = $cfg( 22, 6 );
+	$j   = $send( $cid );
+	t( "one-off overnight window (22..6) at {$at}: blocked, hours shown in the message", false === $j['success'] && 0 === count( crdr_t_requests() ) && false !== mb_strpos( $j['data']['message'], CRDR_Jalali::digits( '22' ) ) && false !== mb_strpos( $j['data']['message'], CRDR_Jalali::digits( '6' ) ), wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
+}
+$pin( '03:00:00' );
 
 // existing protections are untouched: capability, nonce, opt-out
 $cid = $cfg( 0, 24 );
 $uid = wp_insert_user( array( 'user_login' => 'crdr_sub_' . wp_rand(), 'user_pass' => wp_generate_password(), 'role' => 'subscriber' ) );
 $j   = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ), $uid );
 t( 'one-off: a user without manage_woocommerce is refused (403)', false === $j['success'] && 0 === count( crdr_t_requests() ) && 0 === crdr_t_count(), wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
-$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms', 'nonce' => 'bad' ) );
+$j = $send( $cid, 'sms', array( 'nonce' => 'bad' ) );
 t( 'one-off: a bad nonce is refused', true !== ( $j['success'] ?? null ) && 0 === count( crdr_t_requests() ) && 0 === crdr_t_count() );
-crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'optout' ) );
-$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ) );
+$send( $cid, 'optout' );
+$j = $send( $cid );
 t( 'one-off: opt-out is still respected inside the hours', false === $j['success'] && 0 === count( crdr_t_requests() ) );
 wp_delete_user( $uid );
 crdr_t_reset( 0 );

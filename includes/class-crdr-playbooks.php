@@ -282,7 +282,8 @@ class CRDR_Playbooks {
 
 	/** Inside the allowed sending hours (site timezone)? Same rule as before: from <= hour < to. */
 	public static function in_send_window( $ts = null ) {
-		$ts = null === $ts ? time() : (int) $ts;
+		// The filter only lets a site (or a test) pin the clock; by default this is the real time.
+		$ts = null === $ts ? (int) apply_filters( 'crdr_send_window_now', time() ) : (int) $ts;
 		return CRDR_Send_Rules::in_window(
 			CRDR_Send_Rules::hour_in_tz( $ts, wp_timezone() ),
 			CRDR_Settings::get( 'send_from' ),
