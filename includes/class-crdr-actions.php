@@ -377,7 +377,8 @@ class CRDR_Actions {
 	public static function post_save_settings() {
 		self::guard_post();
 		$in     = wp_unslash( $_POST ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
-		$errors = CRDR_Settings::template_errors( CRDR_Settings::sanitize( $in ) );
+		$clean  = CRDR_Settings::sanitize( $in );
+		$errors = array_merge( CRDR_Settings::template_errors( $clean ), CRDR_Settings::window_errors( $clean ) );
 		if ( $errors ) { // nothing is saved; the submitted values come back so the person can fix them.
 			set_transient( CRDR_Settings::draft_key(), array( 'values' => CRDR_Settings::sanitize( $in ), 'errors' => $errors ), 15 * MINUTE_IN_SECONDS );
 			self::back( 'customer-radar-settings', array( 'invalid' => 1 ) );

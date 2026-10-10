@@ -1257,6 +1257,38 @@ t( 'upgrade 3->4: a customer is still resting after the cleaning (cooldown uncha
 $wpdb->query( 'TRUNCATE TABLE ' . CRDR_DB::contacts() );
 crdr_t_reset( 0 );
 
+/* ====== C1. a sending window that can never open is refused when it is saved ====== */
+echo "== settings: sending window\n";
+$errs = function ( $from, $to ) {
+	return CRDR_Settings::window_errors( CRDR_Settings::sanitize( array( 'send_from' => $from, 'send_to' => $to ) ) );
+};
+t( 'window check: 9..21, 0..24, 22..24, 0..1 and 23..24 are valid', array() === $errs( 9, 21 ) && array() === $errs( 0, 24 ) && array() === $errs( 22, 24 ) && array() === $errs( 0, 1 ) && array() === $errs( 23, 24 ) );
+t( 'window check: from == to (9..9) and a window that wraps midnight (22..6) are refused', 1 === count( $errs( 9, 9 ) ) && 1 === count( $errs( 22, 6 ) ) );
+t( 'window check: the message is Persian, shows the two hours and says what to do', false !== mb_strpos( $errs( 22, 6 )[0], 'ساعت شروع' ) && false !== mb_strpos( $errs( 22, 6 )[0], CRDR_Jalali::digits( '22' ) ) && false !== mb_strpos( $errs( 22, 6 )[0], 'شبانه' ) && false !== mb_strpos( $errs( 22, 6 )[0], CRDR_Jalali::digits( '24' ) ) );
+t( 'window check: values outside the form\'s range are clamped first (30..0 becomes 23..1, which is refused)', 1 === count( $errs( 30, 0 ) ) );
+t( 'window check: a form that does not send the hours keeps the defaults, which are valid', array() === CRDR_Settings::window_errors( CRDR_Settings::sanitize( array() ) ) );
+crdr_t_cfg( array(), array( 'send_from' => 10, 'send_to' => 18 ) );
+$read = function () {
+	wp_cache_delete( 'crdr_settings', 'options' ); // the worker process changed it; this process may hold an old copy
+	wp_cache_delete( 'alloptions', 'options' );
+	$o = get_option( 'crdr_settings' );
+	return array( (int) $o['send_from'], (int) $o['send_to'] );
+};
+$w = crdr_t_parallel( array( array( 'save_settings', '1', '22', '6' ) ), 2 );
+t( 'saving 22..6 through the real handler: nothing is stored and the person is sent back to the form', array( 10, 18 ) === $read() && false !== strpos( (string) ( $w[0]['redirect'] ?? '' ), 'invalid=1' ), wp_json_encode( $w ) );
+wp_cache_delete( 'crdr_settings_draft_1', 'transient' );
+$page = crdr_t_page( array( 'CRDR_Page_Settings', 'render' ), array( 'page' => 'customer-radar-settings', 'invalid' => 1 ) );
+t( 'the form comes back with the reason and what was typed', false !== mb_strpos( $page, 'ذخیره نشد' ) && false !== mb_strpos( $page, 'ساعت شروع' ) && false !== strpos( $page, 'value="22"' ) && false !== strpos( $page, 'value="6"' ) );
+$w = crdr_t_parallel( array( array( 'save_settings', '1', '9', '9' ) ), 2 );
+t( 'saving 9..9 is refused too', array( 10, 18 ) === $read() && false !== strpos( (string) ( $w[0]['redirect'] ?? '' ), 'invalid=1' ) );
+$w = crdr_t_parallel( array( array( 'save_settings', '1', '8', '22' ) ), 2 );
+t( 'saving a valid window works as before', array( 8, 22 ) === $read() && false !== strpos( (string) ( $w[0]['redirect'] ?? '' ), 'saved=1' ), wp_json_encode( $w ) );
+// a window saved by an earlier version is not touched; it keeps failing safe and explaining itself (unchanged behaviour)
+update_option( 'crdr_settings', array_merge( CRDR_Settings::all(), array( 'send_from' => 22, 'send_to' => 6 ) ) );
+t( 'an already stored overnight window still never opens (fail closed, unchanged)', false === CRDR_Playbooks::in_send_window() );
+crdr_t_cfg();
+crdr_t_reset( 0 );
+
 /* ====================================================== C. duplicate sends */
 echo "== duplicate-send prevention\n";
 crdr_t_cfg();

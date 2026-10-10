@@ -51,6 +51,17 @@ switch ( $job ) {
 		echo wp_json_encode( array( 'error' => 'no redirect' ) ) . "\n";
 		break;
 
+	case 'save_settings': // the real Settings save handler: args user id, send_from, send_to
+		wp_set_current_user( (int) $args[0] );
+		$_POST = $_REQUEST = array( '_wpnonce' => wp_create_nonce( CRDR_Actions::NONCE ), 'send_from' => $args[1], 'send_to' => $args[2] );
+		add_filter( 'wp_redirect', function ( $loc ) {
+			echo wp_json_encode( array( 'redirect' => $loc ) ) . "\n";
+			exit( 0 );
+		} );
+		CRDR_Actions::post_save_settings();
+		echo wp_json_encode( array( 'error' => 'no redirect' ) ) . "\n";
+		break;
+
 	case 'crash': // claim, talk to the gateway, then die before the outcome is recorded
 		$c     = CRDR_Actions::customer_by_key( $args[0] );
 		$claim = CRDR_Send::claim( $c['ckey'], 'dormant', 'crash' );

@@ -61,6 +61,20 @@ class CRDR_Settings {
 		return $errors;
 	}
 
+	/**
+	 * Persian problem with the sending hours of a sanitized settings array; empty = valid.
+	 * A window must start before it ends. A window that wraps midnight (22..6) is NOT supported on purpose: it would never
+	 * open (nothing is sent), and supporting it would make a swapped pair of hours (21..9) silently send promotional SMS at night.
+	 */
+	public static function window_errors( array $s ) {
+		$from = isset( $s['send_from'] ) ? (int) $s['send_from'] : 0;
+		$to   = isset( $s['send_to'] ) ? (int) $s['send_to'] : 24;
+		if ( $from < $to ) {
+			return array();
+		}
+		return array( 'ساعت مجاز ارسال: ساعت شروع (' . CRDR_Jalali::digits( (string) $from ) . ') باید کوچک‌تر از ساعت پایان (' . CRDR_Jalali::digits( (string) $to ) . ') باشد. بازه‌ی شبانه (مثل ۲۲ تا ۶) پشتیبانی نمی‌شود و چنین بازه‌ای هرگز باز نمی‌شود، یعنی هیچ پیامکی نمی‌رود. برای ارسال تا آخر شب، پایان را ' . CRDR_Jalali::digits( '24' ) . ' بگذارید.' );
+	}
+
 	public static function draft_key() {
 		return 'crdr_settings_draft_' . get_current_user_id();
 	}

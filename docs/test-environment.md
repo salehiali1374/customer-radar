@@ -40,7 +40,7 @@ next page load):
     wp core install --url=http://localhost --title=P1 --admin_user=tester --admin_password=<throwaway> --admin_email=t@example.invalid
     wp plugin activate woocommerce customer-radar
     wp option update crdr_test_shop 1
-    wp eval-file wp-content/plugins/customer-radar/tests/phase1-safety.php      # expect: 360 passed, 0 failed
+    wp eval-file wp-content/plugins/customer-radar/tests/phase1-safety.php      # expect: 370 passed, 0 failed
 
 The suite pins the clock (03:00 Asia/Tehran, via the `crdr_send_window_now` filter) and sets the site timezone itself, so it gives the same
 result at any time of day and on repeated runs.
