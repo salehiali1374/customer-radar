@@ -122,11 +122,33 @@ class CRDR_Actions {
 
 	/* -------------------------------------------------------- manual contact */
 
+	/**
+	 * Persian reason why a one-off promotional SMS may not be sent right now (outside the sending hours), or ''.
+	 * Decided on the server with the same hours as campaigns (Settings); the browser only shows the answer.
+	 */
+	private static function one_off_window_block() {
+		$gate = CRDR_Send_Rules::gate_one_off( CRDR_Playbooks::in_send_window() );
+		if ( $gate['allowed'] ) {
+			return '';
+		}
+		$from = (int) CRDR_Settings::get( 'send_from' );
+		$to   = (int) CRDR_Settings::get( 'send_to' );
+		$msg  = CRDR_Send_Rules::gate_message( $gate['code'] ) . ' ساعت مجاز فعلی: ' . CRDR_Jalali::digits( (string) $from ) . ' تا ' . CRDR_Jalali::digits( (string) $to ) . '.';
+		if ( $from >= $to ) { // a window that wraps midnight is not supported, and then no hour is allowed.
+			$msg .= ' توجه: ساعت شروع باید کوچک‌تر از ساعت پایان باشد (بازه‌ی شبانه مثل ۲۲ تا ۶ پشتیبانی نمی‌شود).';
+		}
+		return $msg;
+	}
+
 	public static function ajax_preview() {
 		self::guard();
 		$cust = self::customer( isset( $_POST['id'] ) ? absint( $_POST['id'] ) : 0 );
 		if ( ! $cust ) {
 			wp_send_json_error( array( 'message' => 'مشتری پیدا نشد.' ) );
+		}
+		$closed = self::one_off_window_block(); // the preview is only the step before sending: say so now.
+		if ( '' !== $closed ) {
+			wp_send_json_error( array( 'message' => $closed ) );
 		}
 		$with_coupon = ! empty( $_POST['coupon'] );
 		$tpl         = CRDR_Settings::get( $with_coupon ? 'sms_template_coupon' : 'sms_template' );
@@ -168,6 +190,11 @@ class CRDR_Actions {
 		}
 		if ( 'sms' !== $type && 'sms_coupon' !== $type ) {
 			wp_send_json_error( array( 'message' => 'نوع اقدام نامعتبر است.' ) );
+		}
+		// Promotional SMS only (see CRDR_Send_Rules::gate_one_off): sending hours first, before anything is claimed or created.
+		$closed = self::one_off_window_block();
+		if ( '' !== $closed ) {
+			wp_send_json_error( array( 'message' => $closed ) );
 		}
 		$cool = self::in_cooldown( $cust['ckey'] );
 		if ( 'optout' === $cool ) {

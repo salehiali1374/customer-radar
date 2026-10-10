@@ -252,6 +252,22 @@ foreach ( array( 'mode_off', 'not_auto', 'outside_window', 'override_forbidden' 
 }
 check( 'gate message for ok is empty', CRDR_Send_Rules::gate_message( 'ok' ), '' );
 
+/* ---- one-off (single customer) promotional SMS: sending hours only, never an override ---- */
+$o = function ( $in ) {
+	$r = CRDR_Send_Rules::gate_one_off( $in );
+	return array( $r['allowed'], $r['code'], $r['override'] );
+};
+check( 'one-off gate: inside the hours is allowed', $o( true ), array( true, 'ok', false ) );
+check( 'one-off gate: outside the hours is blocked, with no override', $o( false ), array( false, 'outside_window', false ) );
+check( 'one-off gate: its refusal has a Persian message', '' !== CRDR_Send_Rules::gate_message( CRDR_Send_Rules::gate_one_off( false )['code'] ), true );
+check( 'one-off gate: boundaries 9..21 (from inclusive, to exclusive)', array(
+	$o( CRDR_Send_Rules::in_window( 8, 9, 21 ) )[0], $o( CRDR_Send_Rules::in_window( 9, 9, 21 ) )[0],
+	$o( CRDR_Send_Rules::in_window( 20, 9, 21 ) )[0], $o( CRDR_Send_Rules::in_window( 21, 9, 21 ) )[0],
+), array( false, true, true, false ) );
+check( 'one-off gate: a window that wraps midnight (22..6) blocks every hour (unchanged, same as campaigns)', array_unique( array_map( function ( $h ) use ( $o ) {
+	return $o( CRDR_Send_Rules::in_window( $h, 22, 6 ) )[0];
+}, range( 0, 23 ) ) ), array( false ) );
+
 /* ---- sending hours, in the SITE timezone ---- */
 $teh = new DateTimeZone( 'Asia/Tehran' );
 $win = function ( $ts, $tz, $from = 9, $to = 21 ) {

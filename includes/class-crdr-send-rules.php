@@ -64,6 +64,20 @@ class CRDR_Send_Rules {
 		return array( 'allowed' => true, 'code' => 'ok', 'override' => true );
 	}
 
+	/**
+	 * May ONE promotional SMS to a single customer (call-list buttons) be sent right now?
+	 *
+	 * Same sending hours as campaigns, but there is no campaign mode to check and, by design, no override:
+	 * the manual override exists for a deliberate bulk run, not for a single click. This is only for the plugin's
+	 * own promotional texts (the two win-back templates in Settings); order/transactional SMS are sent by the
+	 * WooCommerce SMS plugin and never pass through here, so they are not restricted by it.
+	 *
+	 * @return array allowed (bool), code (string: ok | outside_window), override (always false)
+	 */
+	public static function gate_one_off( $in_window ) {
+		return self::gate( 'manual', 'manual', (bool) $in_window, false, false );
+	}
+
 	public static function gate_message( $code ) {
 		$m = array(
 			'mode_off'           => 'این کمپین غیرفعال است. برای اجرا، حالت آن را روی «دستی» یا «خودکار» بگذارید.',

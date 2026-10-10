@@ -40,7 +40,7 @@ next page load):
     wp core install --url=http://localhost --title=P1 --admin_user=tester --admin_password=<throwaway> --admin_email=t@example.invalid
     wp plugin activate woocommerce customer-radar
     wp option update crdr_test_shop 1
-    wp eval-file wp-content/plugins/customer-radar/tests/phase1-safety.php      # expect: 142 passed, 0 failed
+    wp eval-file wp-content/plugins/customer-radar/tests/phase1-safety.php      # expect: 162 passed, 0 failed
 
 `tests/integration.php` needs the seeded shop (`gen2.php`) and the `pwsms-stub.php` mu-plugin as before.
 

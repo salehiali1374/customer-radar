@@ -91,8 +91,8 @@ function crdr_t_parallel( array $jobs, $lead = 6 ) {
 
 /** Call an admin-ajax handler in-process and return its JSON answer. */
 class CRDR_T_Done extends Exception {}
-function crdr_t_ajax( $callable, array $post ) {
-	wp_set_current_user( 1 );
+function crdr_t_ajax( $callable, array $post, $user = 1 ) {
+	wp_set_current_user( $user );
 	$_POST = $_REQUEST = array_merge( array( 'nonce' => wp_create_nonce( CRDR_Actions::NONCE ) ), $post );
 	add_filter( 'wp_doing_ajax', '__return_true' );
 	$h = function () {
@@ -336,6 +336,81 @@ crdr_t_cfg( array( 'mode' => 'off', 'template' => 'کد {coupon}' ) );
 $j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_pb_mode' ), array( 'id' => 'dormant', 'mode' => 'manual' ) );
 t( 'ajax_pb_mode: invalid template cannot be switched on', false === $j['success'] && false !== mb_strpos( $j['data']['message'], '{coupon}' ) );
 
+/* ============================== A2. single-customer (one-off) SMS and the sending hours */
+echo "== one-off SMS: sending hours\n";
+// This action is promotional only: its text comes from the two win-back templates in Settings, it is offered on the
+// call list of lapsed customers, and it obeys opt-out and cooldown. Transactional SMS (orders) never go through it.
+$coupons = function () use ( $wpdb ) {
+	return (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type = 'shop_coupon'" );
+};
+$h   = (int) wp_date( 'G' );
+$cfg = function ( $from, $to ) {
+	crdr_t_cfg( array( 'mode' => 'off' ), array( 'send_from' => $from, 'send_to' => $to, 'sms_template' => 'سلام {name}', 'sms_template_coupon' => 'سلام {name} کد {coupon} تا {expire}' ) );
+	crdr_t_reset( 3 );
+	return (int) $GLOBALS['wpdb']->get_var( 'SELECT id FROM ' . CRDR_DB::customers() . ' ORDER BY id LIMIT 1' );
+};
+
+// outside the hours
+$cid    = $cfg( $closed['send_from'], $closed['send_to'] );
+$coup0  = $coupons();
+$j      = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ) );
+t( 'one-off outside hours: refused', false === $j['success'], wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
+t( 'one-off outside hours: Persian reason that names the hours', false !== mb_strpos( $j['data']['message'], 'ساعت مجاز' ) && false !== mb_strpos( $j['data']['message'], CRDR_Jalali::digits( (string) $closed['send_from'] ) ), $j['data']['message'] ?? '' );
+t( 'one-off outside hours: nothing claimed, nothing reached the gateway', 0 === crdr_t_count() && 0 === count( crdr_t_requests() ) );
+$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms_coupon' ) );
+t( 'one-off outside hours: coupon SMS refused too', false === $j['success'] && 0 === crdr_t_count() && 0 === count( crdr_t_requests() ) );
+t( 'one-off outside hours: no discount code is created for a blocked coupon SMS', $coup0 === $coupons() );
+$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms', 'override' => 1, 'override_window' => 1 ) );
+t( 'one-off outside hours: an administrator cannot override it (no such option)', false === $j['success'] && 0 === count( crdr_t_requests() ) );
+$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_preview' ), array( 'id' => $cid, 'coupon' => 0 ) );
+t( 'one-off outside hours: the preview already says so (no pointless confirm box)', false === $j['success'] && false !== mb_strpos( $j['data']['message'], 'ساعت مجاز' ) );
+foreach ( array( 'called', 'skip', 'optout' ) as $type ) {
+	$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => $type, 'note' => 'x' ) );
+	t( "one-off outside hours: '$type' is not an SMS and still works", true === $j['success'], wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
+}
+$cid2 = (int) $wpdb->get_var( 'SELECT id FROM ' . CRDR_DB::customers() . ' ORDER BY id LIMIT 1 OFFSET 1' );
+$j    = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid2, 'type' => 'sms' ) );
+t( 'one-off outside hours: a refused attempt leaves no trace, so the customer is not "contacted"', false === $j['success'] && 0 === crdr_t_count( "ckey = 'p:09120000002'" ) );
+
+// a blocked click must not use up the cooldown: once the window opens, the same customer can be messaged
+$cid = $cfg( $closed['send_from'], $closed['send_to'] );
+crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ) );
+crdr_t_cfg( array( 'mode' => 'off' ), array( 'send_from' => 0, 'send_to' => 24, 'sms_template' => 'سلام {name}' ) );
+$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ) );
+t( 'one-off: after a blocked click, the same customer can be messaged once the window opens', true === $j['success'] && 1 === count( crdr_t_requests() ) && 1 === crdr_t_count( "kind = 'sms' AND status = 'ok'" ), wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
+
+// boundaries around "now"
+$cid = $cfg( $h, $h + 1 ); // [h, h+1): the start is inclusive
+$j   = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ) );
+t( 'one-off boundary: window starting at the current hour is open', true === $j['success'] && 1 === count( crdr_t_requests() ), wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
+$cid = $cfg( 0, $h ); // [0, h): the end is exclusive (for h = 0 this is an empty window)
+$j   = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ) );
+t( 'one-off boundary: window ending at the current hour is closed', false === $j['success'] && 0 === count( crdr_t_requests() ) && 0 === crdr_t_count() );
+$cid = $cfg( $h, $h ); // from == to is always closed (unchanged behaviour)
+$j   = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ) );
+t( 'one-off boundary: from == to is closed', false === $j['success'] && 0 === count( crdr_t_requests() ) );
+$cid = $cfg( 0, 24 );
+$j   = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms_coupon' ) );
+t( 'one-off boundary: 0..24 is always open, coupon SMS goes out', true === $j['success'] && 1 === count( crdr_t_requests() ) && 1 === crdr_t_count( "coupon <> '' AND status = 'ok'" ), wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
+
+// overnight window: not supported, so it blocks every hour (same as campaigns); the message shows the hours so it is discoverable
+$cid = $cfg( 22, 6 );
+$j   = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ) );
+t( 'one-off overnight window (22..6): blocked at any hour, hours shown in the message', false === $j['success'] && 0 === count( crdr_t_requests() ) && false !== mb_strpos( $j['data']['message'], CRDR_Jalali::digits( '22' ) ) && false !== mb_strpos( $j['data']['message'], CRDR_Jalali::digits( '6' ) ), wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
+
+// existing protections are untouched: capability, nonce, opt-out
+$cid = $cfg( 0, 24 );
+$uid = wp_insert_user( array( 'user_login' => 'crdr_sub_' . wp_rand(), 'user_pass' => wp_generate_password(), 'role' => 'subscriber' ) );
+$j   = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ), $uid );
+t( 'one-off: a user without manage_woocommerce is refused (403)', false === $j['success'] && 0 === count( crdr_t_requests() ) && 0 === crdr_t_count(), wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
+$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms', 'nonce' => 'bad' ) );
+t( 'one-off: a bad nonce is refused', true !== ( $j['success'] ?? null ) && 0 === count( crdr_t_requests() ) && 0 === crdr_t_count() );
+crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'optout' ) );
+$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ) );
+t( 'one-off: opt-out is still respected inside the hours', false === $j['success'] && 0 === count( crdr_t_requests() ) );
+wp_delete_user( $uid );
+crdr_t_reset( 0 );
+
 /* ====================================================== C. duplicate sends */
 echo "== duplicate-send prevention\n";
 crdr_t_cfg();
@@ -533,7 +608,7 @@ set_transient( CRDR_Settings::draft_key(), array( 'values' => CRDR_Settings::san
 $html = crdr_t_page( array( 'CRDR_Page_Settings', 'render' ), array( 'page' => 'customer-radar-settings', 'invalid' => 1 ) );
 t( 'settings after a rejected save: error shown and typed text kept', $clean( $html ) && false !== mb_strpos( $html, 'خطای آزمایشی' ) && false !== mb_strpos( $html, 'مرحله {coupon}' ) );
 $html = crdr_t_page( array( 'CRDR_Page_Settings', 'render' ), array( 'page' => 'customer-radar-settings' ) );
-t( 'settings page opened normally renders', $clean( $html ) && false !== mb_strpos( $html, 'ارسال کمپین‌ها (خودکار و دستی) فقط از ساعت' ) );
+t( 'settings page opened normally renders', $clean( $html ) && false !== mb_strpos( $html, 'ارسال پیامک‌های تبلیغاتی (کمپین خودکار، کمپین دستی و پیامک تکی فهرست تماس) فقط از ساعت' ) );
 CRDR_DB::add_contact( 'p:09120000001', 'sms', array( 'playbook' => 'dormant', 'status' => 'unknown', 'error' => 'timeout', 'message' => 'سلام' ) );
 $cid  = (int) $wpdb->get_var( 'SELECT id FROM ' . CRDR_DB::customers() . " WHERE ckey = 'p:09120000001'" );
 $html = crdr_t_page( array( 'CRDR_Page_Customers', 'render_detail' ), array( 'page' => 'customer-radar-customer', 'id' => $cid ) );

@@ -49,7 +49,7 @@ class CRDR_Page_Settings {
 		echo '<tr><th>متن پیامک ساده (فهرست تماس)</th><td><textarea name="sms_template" rows="3" class="large-text">' . esc_textarea( $s['sms_template'] ) . '</textarea><p class="description">متغیرها: {name} {store} {optout}</p></td></tr>';
 		echo '<tr><th>متن پیامک با کد تخفیف (فهرست تماس)</th><td><textarea name="sms_template_coupon" rows="3" class="large-text">' . esc_textarea( $s['sms_template_coupon'] ) . '</textarea><p class="description">متغیرها: {name} {store} {coupon} {discount} {expire} {optout}</p></td></tr>';
 		echo '<tr><th>عبارت لغو عضویت</th><td><input type="text" class="regular-text" name="optout_text" maxlength="30" value="' . esc_attr( $s['optout_text'] ) . '"><p class="description">در پایان پیامک‌های تبلیغاتی کمپین‌ها می‌آید. قوانین اپراتورها را با پنل پیامکی خودتان بررسی کنید؛ بیشتر پنل‌ها «لغو۱۱» را می‌خواهند.</p></td></tr>';
-		self::num( 'send_from', 'ارسال کمپین‌ها (خودکار و دستی) فقط از ساعت (۰ تا ۲۳)', $s['send_from'] );
+		self::num( 'send_from', 'ارسال پیامک‌های تبلیغاتی (کمپین خودکار، کمپین دستی و پیامک تکی فهرست تماس) فقط از ساعت (۰ تا ۲۳)', $s['send_from'] );
 		self::num( 'send_to', 'تا ساعت (۱ تا ۲۴)', $s['send_to'] );
 		echo '</tbody></table>';
 
