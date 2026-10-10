@@ -226,12 +226,24 @@ class CRDR_Send {
 	public static function recover_stale( $max_age = null ) {
 		global $wpdb;
 		$max_age = null === $max_age ? self::STALE_AFTER : (int) $max_age;
-		$n       = $wpdb->query( $wpdb->prepare(
-			'UPDATE ' . CRDR_DB::contacts() . " SET status = 'unknown', claim_key = NULL, error = %s WHERE status = 'pending' AND created_ts < %d", // phpcs:ignore WordPress.DB.PreparedSQL
-			'اجرا نیمه‌کاره ماند و نتیجه‌ی ارسال معلوم نیست؛ دوباره ارسال نمی‌شود.',
-			time() - $max_age
+		$cut     = time() - $max_age;
+		$k       = CRDR_DB::contacts();
+		// 1. The text and the localid are recorded BEFORE the gateway is called (send_claimed). A claim without a localid
+		//    therefore never reached the gateway: nothing was sent, so it is not a contact and the customer may be tried
+		//    again. If the original process is merely slow, its later "record the text" step fails (the row is no longer
+		//    pending) and it sends nothing.
+		$never = $wpdb->query( $wpdb->prepare(
+			"UPDATE {$k} SET status = 'failed', claim_key = NULL, error = %s WHERE status = 'pending' AND localid = '' AND created_ts < %d", // phpcs:ignore WordPress.DB.PreparedSQL
+			'اجرا پیش از ارسال متوقف شد؛ پیامکی نرفت و دوباره امتحان می‌شود.',
+			$cut
 		) );
-		return (int) $n;
+		// 2. Everything else may have gone out (the process died or timed out during or after the call): unknown, never retried.
+		$maybe = $wpdb->query( $wpdb->prepare(
+			"UPDATE {$k} SET status = 'unknown', claim_key = NULL, error = %s WHERE status = 'pending' AND created_ts < %d", // phpcs:ignore WordPress.DB.PreparedSQL
+			'اجرا نیمه‌کاره ماند و نتیجه‌ی ارسال معلوم نیست؛ دوباره ارسال نمی‌شود.',
+			$cut
+		) );
+		return (int) $never + (int) $maybe;
 	}
 
 	/* ------------------------------------------------------------ explicit override */

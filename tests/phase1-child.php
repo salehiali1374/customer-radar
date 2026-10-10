@@ -69,7 +69,12 @@ switch ( $job ) {
 			echo wp_json_encode( array( 'claimed' => false, 'skip' => $claim['skip'] ) ) . "\n";
 			break;
 		}
-		CRDR_SMS::deliver( $c['phone'], 'سلام', CRDR_Send_Rules::localid() );
+		// Exactly what send_claimed() does before it talks to the gateway: record the text and the localid first.
+		$localid = CRDR_Send_Rules::localid();
+		$an      = new ReflectionMethod( 'CRDR_Send', 'annotate' );
+		$an->setAccessible( true );
+		$an->invoke( null, $claim['id'], 'سلام', '', $localid );
+		CRDR_SMS::deliver( $c['phone'], 'سلام', $localid );
 		echo wp_json_encode( array( 'claimed' => true, 'row' => $claim['id'] ) ) . "\n";
 		exit( 0 ); // no finalize(): the row stays 'pending'
 }

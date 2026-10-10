@@ -1439,11 +1439,43 @@ crdr_t_cfg();
 crdr_t_reset( 4 );
 $fresh = CRDR_Send::claim( 'p:09120000001', 'dormant', 'x' );
 t( 'recover_stale leaves a fresh claim alone', 0 === CRDR_Send::recover_stale() && 'busy' === CRDR_Send::claim( 'p:09120000001', 'dormant', 'y' )['skip'] );
-$wpdb->query( 'UPDATE ' . CRDR_DB::contacts() . ' SET created_ts = ' . ( time() - 3600 ) . ' WHERE id = ' . (int) $fresh['id'] );
-t( 'recover_stale converts an abandoned claim to "unknown"', 1 === CRDR_Send::recover_stale() );
+// the ten-minute boundary (600 s): 599 s old is still in flight, 601 s old is abandoned
+$wpdb->query( 'UPDATE ' . CRDR_DB::contacts() . ' SET created_ts = ' . ( time() - 599 ) . ' WHERE id = ' . (int) $fresh['id'] );
+t( 'stale boundary: a claim 599 s old is left alone', 0 === CRDR_Send::recover_stale() && 'pending' === crdr_t_rows( "id = {$fresh['id']}" )[0]['status'] );
+$wpdb->query( 'UPDATE ' . CRDR_DB::contacts() . ' SET created_ts = ' . ( time() - 601 ) . ' WHERE id = ' . (int) $fresh['id'] );
+t( 'stale boundary: a claim 601 s old is recovered', 1 === CRDR_Send::recover_stale() );
+// never reached the gateway (no localid was ever recorded): nothing was sent, so it is NOT a contact and may be tried again
 $row = crdr_t_rows( "id = {$fresh['id']}" )[0];
-t( 'recovered row: unknown, claim key freed, explanation stored', 'unknown' === $row['status'] && null === $row['claim_key'] && '' !== $row['error'] );
+t( 'recovered before sending: status failed (nothing went out), claim key freed, a reason is stored, no text', 'failed' === $row['status'] && null === $row['claim_key'] && '' !== $row['error'] && '' === (string) $row['message'] && '' === $row['localid'] );
+t( 'recovered before sending: the customer is NOT resting and can be claimed again', '' === CRDR_DB::blocked_reason( 'p:09120000001' ) && isset( CRDR_Send::claim( 'p:09120000001', 'dormant', 'z' )['id'] ) );
+$wpdb->query( 'DELETE FROM ' . CRDR_DB::contacts() . " WHERE ckey = 'p:09120000001' AND status = 'pending'" );
+
+// the slow original process wakes up after its claim was recovered: it must not send
+crdr_t_cfg( array(), array(), array( 'mode' => 'ok' ) );
+crdr_t_reset( 3 );
+$slow = CRDR_Send::claim( 'p:09120000001', 'dormant', 'slow' );
+$wpdb->query( 'UPDATE ' . CRDR_DB::contacts() . ' SET created_ts = ' . ( time() - 3600 ) . ' WHERE id = ' . (int) $slow['id'] );
+CRDR_Send::recover_stale();
+$out = CRDR_Send::send_claimed( $slow['id'], '09120000001', 'سلام' );
+t( 'a slow process whose claim was recovered before it recorded its text sends nothing', 'failed' === $out['state'] && 0 === count( crdr_t_requests() ) && 'failed' === crdr_t_rows( "id = {$slow['id']}" )[0]['status'] );
+
+// reached the gateway (localid recorded): it may have gone out, so it becomes unknown and the customer rests
+crdr_t_reset( 3 );
+$sent = CRDR_Send::claim( 'p:09120000001', 'dormant', 'x2' );
+$an   = new ReflectionMethod( 'CRDR_Send', 'annotate' );
+$an->setAccessible( true );
+$an->invoke( null, $sent['id'], 'سلام', '', '1790000000000000009' );
+$wpdb->query( 'UPDATE ' . CRDR_DB::contacts() . ' SET created_ts = ' . ( time() - 3600 ) . ' WHERE id = ' . (int) $sent['id'] );
+t( 'recover_stale converts a claim that reached the sending step to "unknown"', 1 === CRDR_Send::recover_stale() );
+$row = crdr_t_rows( "id = {$sent['id']}" )[0];
+t( 'recovered after sending: unknown, claim key freed, explanation stored, the text is kept', 'unknown' === $row['status'] && null === $row['claim_key'] && '' !== $row['error'] && 'سلام' === $row['message'] );
 t( 'recovered customer is NOT eligible for another send', 'cooldown' === CRDR_Send::claim( 'p:09120000001', 'dormant', 'z' )['skip'] );
+crdr_t_reset( 4 );
+$a = CRDR_Send::claim( 'p:09120000001', 'dormant', 'a' );
+$b = CRDR_Send::claim( 'p:09120000002', 'dormant', 'b' );
+$an->invoke( null, $b['id'], 'سلام', '', '1790000000000000010' );
+$wpdb->query( 'UPDATE ' . CRDR_DB::contacts() . ' SET created_ts = ' . ( time() - 3600 ) );
+t( 'recover_stale handles a never-sent and a possibly-sent claim in one call', 2 === CRDR_Send::recover_stale() && 'failed' === crdr_t_rows( "id = {$a['id']}" )[0]['status'] && 'unknown' === crdr_t_rows( "id = {$b['id']}" )[0]['status'] );
 
 // a real crash: the worker talks to the gateway and dies before recording the outcome
 crdr_t_cfg( array(), array(), array( 'mode' => 'ok' ) );
