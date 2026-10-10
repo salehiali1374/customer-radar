@@ -37,3 +37,15 @@
   The text tells the owner what to set up (a real cron calling `wp-cron.php` every hour). No heartbeat or extra write is added.
 * **Limits:** it cannot warn before the thresholds, and a site on WP-Cron with very low traffic may send late (no visits, no run);
   that is how WP-Cron works, and the 48-hour rule only reports a scheduler that visits do not wake up.
+
+## 4. `crdr_run_log_lost` (what it means, how long it lives)
+* **Meaning:** a running total of *override* entries (a person sent outside the sending hours) that had to be dropped because the
+  audit class was full (300 entries). It is 0 on every normal shop. Routine cron activity can no longer push such entries out; only
+  300 newer overrides can.
+* **Retention:** it is never reset and never expires; it is deleted only on uninstall. It holds a number, no personal data.
+* **Realistic risk:** low. One browser run writes one entry per step (a step is 20 customers), so 300 entries are about 6,000
+  customers messaged outside the hours. The larger gap is that **nothing in the admin shows the run log or this counter at all**:
+  the audit trail exists but is readable only in the database.
+* **Decision:** no code change; a viewer is a UI feature, not a small fix. Recommended follow-up: a read-only "manual runs" page
+  (who, when, which campaign, outside the hours or not, counts) that also shows this counter when it is above 0, and writing one
+  entry per override *run* instead of one per step.
