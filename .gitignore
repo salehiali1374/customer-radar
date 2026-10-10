@@ -1,0 +1,112 @@
+# Customer Radar - conservative .gitignore for a PHP / WordPress plugin.
+# Rule of thumb: anything that could hold a secret, a customer's data or a local setting stays out.
+# If a file here is genuinely needed later, add it deliberately with `git add -f <file>` after reviewing it.
+
+# --- Secrets, credentials, private keys ---------------------------------------------------------
+.env
+.env.*
+*.env
+.wppass
+.dbpass
+.netrc
+.npmrc
+.pypirc
+.htpasswd
+auth.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.ppk
+id_rsa*
+id_ed25519*
+id_ecdsa*
+*.secret
+*.secrets
+secrets.*
+credentials.*
+*-credentials.*
+*_credentials.*
+
+# --- Local / private configuration ---------------------------------------------------------------
+wp-config.php
+wp-config-*.php
+local-config.php
+*.local
+*.local.*
+config.local.*
+docker-compose.override.yml
+.claude/
+CLAUDE.local.md
+.idea/
+.vscode/
+*.sublime-workspace
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Customer data, exports and database dumps ---------------------------------------------------
+# The plugin exports customer lists as CSV/Excel; never commit one.
+*.sql
+*.sql.gz
+*.sql.zip
+*.dump
+*.sqlite
+*.sqlite3
+*.db
+*.mdb
+*.csv
+*.tsv
+*.xls
+*.xlsx
+*.ods
+*.bak
+*.backup
+*.orig
+*.rej
+backup/
+backups/
+exports/
+export/
+dumps/
+data/
+
+# --- Logs and local test output ------------------------------------------------------------------
+*.log
+logs/
+error_log
+debug.log
+npm-debug.log*
+yarn-debug.log*
+crdr-t-http.log
+pwsms-calls.log
+seed*.log
+tmp/
+temp/
+.cache/
+.phpunit.result.cache
+.phpcs-cache
+coverage/
+*.cover
+
+# --- Generated artifacts and release packages ----------------------------------------------------
+# Release zips are rebuilt from source; publish them as GitHub Releases / on marketplace, not in git history.
+dist/
+build/
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+
+# --- Dependencies (not installed in this project; never commit them if they appear) --------------
+node_modules/
+vendor/
+bower_components/
+wp-content/uploads/
