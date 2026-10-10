@@ -54,6 +54,10 @@ class CRDR_Page_Campaigns {
 				echo '<li>نتیجه تا امروز: پیام‌گرفته‌ها ' . esc_html( CRDR_UI::pct( $tr, 1 ) ) . ' خرید مجدد، گروه شاهد ' . esc_html( CRDR_UI::pct( $ho, 1 ) ) . '</li>';
 			}
 			echo CRDR_Health::card_item( $id, $pb ); // phpcs:ignore WordPress.Security.EscapeOutput -- escaped inside
+			$aside = CRDR_Playbooks::set_aside( $id );
+			if ( $aside['count'] ) {
+				echo '<li class="crdr-bad">' . esc_html( CRDR_UI::num( $aside['count'] ) ) . ' مشتری فعلاً کنار گذاشته شده‌اند، چون پیامشان ساخته نمی‌شود: ' . esc_html( $aside['reason'] ) . ' پس از اصلاح، با ذخیره‌ی کمپین یا تنظیمات (یا حداکثر ' . esc_html( CRDR_UI::num( (int) ( CRDR_Send_Rules::BUILD_BACKOFF / HOUR_IN_SECONDS ) ) ) . ' ساعت بعد) دوباره امتحان می‌شوند.</li>';
+			}
 			echo '</ul>';
 			echo '<p class="crdr-actions-row"><button type="button" class="button button-primary crdr-pb-open">پیش‌نمایش و اجرا</button> ';
 			echo '<a class="button" href="' . esc_url( admin_url( 'admin.php?page=customer-radar-campaigns&edit=' . $id ) ) . '">ویرایش</a> ';
@@ -211,7 +215,7 @@ class CRDR_Page_Campaigns {
 		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT c.*, cu.name FROM {$k} c LEFT JOIN " . CRDR_DB::customers() . " cu ON cu.ckey = c.ckey WHERE c.playbook = %s AND c.kind = 'sms' ORDER BY c.id DESC LIMIT 20", $id ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL
 		if ( $rows ) {
 			echo '<div class="crdr-card"><h3>آخرین ارسال‌ها</h3><div class="crdr-scroll"><table class="widefat striped crdr-table"><thead><tr><th>زمان</th><th>مشتری</th><th>گروه</th><th>وضعیت</th><th>پیام</th></tr></thead><tbody>';
-			$st = array( 'ok' => 'ارسال شد', 'failed' => 'ناموفق', 'holdout' => 'شاهد', 'unknown' => 'نتیجه نامشخص (ممکن است رفته باشد)', 'pending' => 'در حال ارسال' );
+			$st = array( 'ok' => 'ارسال شد', 'failed' => 'ناموفق', 'nobuild' => 'پیام ساخته نشد', 'holdout' => 'شاهد', 'unknown' => 'نتیجه نامشخص (ممکن است رفته باشد)', 'pending' => 'در حال ارسال' );
 			foreach ( $rows as $c ) {
 				echo '<tr><td>' . esc_html( CRDR_Jalali::date( $c['created_ts'] ) . ' ' . CRDR_Jalali::digits( wp_date( 'H:i', $c['created_ts'] ) ) ) . '</td><td>' . esc_html( $c['name'] ?: '—' ) . '</td><td>' . ( 'holdout' === $c['grp'] ? 'شاهد' : 'پیام' ) . '</td><td>' . esc_html( isset( $st[ $c['status'] ] ) ? $st[ $c['status'] ] : $c['status'] ) . ( $c['error'] ? ' — ' . esc_html( $c['error'] ) : '' ) . '</td><td class="crdr-muted">' . esc_html( $c['message'] ) . '</td></tr>';
 			}

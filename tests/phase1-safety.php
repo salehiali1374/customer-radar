@@ -280,8 +280,8 @@ update_option( 'blogname', '' );
 $r = CRDR_Playbooks::run( 'dormant', 6 );
 update_option( 'blogname', $blogname );
 t( 'unfillable placeholder at send time: nothing sent', 0 === $r['sent'] && 0 === count( crdr_t_requests() ), wp_json_encode( $r, JSON_UNESCAPED_UNICODE ) );
-t( 'unfillable placeholder: counted as failed, run stops after 3', 3 === $r['failed'] );
-t( 'unfillable placeholder: rows say failed and name the token', 3 === crdr_t_count( "status = 'failed' AND error LIKE '%{store}%'" ) );
+t( 'unfillable placeholder: counted as failed (6 of 6: fewer than 10 in a row, so the run goes on)', 6 === $r['failed'] );
+t( 'unfillable placeholder: rows say nobuild (nothing sent, not a contact) and name the token', 6 === crdr_t_count( "status = 'nobuild' AND error LIKE '%{store}%'" ) && 0 === crdr_t_count( "status = 'failed'" ) );
 t( 'unfillable placeholder: the claim was released (claim_key cleared)', 0 === crdr_t_count( 'claim_key IS NOT NULL' ) );
 crdr_t_cfg( array( 'mode' => 'manual', 'cross_sell' => true, 'template' => 'پیشنهاد {product}' ) );
 $pbx = CRDR_Playbooks::get( 'dormant' );
@@ -658,6 +658,137 @@ update_option( CRDR_Send::LOG_OPTION, 'garbage', false );
 CRDR_Send::log_run( $mkm( 9, true ) );
 t( 'a corrupted log option is replaced, the new entry is kept', 1 === count( $run() ) && 'm9' === $run()[0]['run'] );
 $fresh();
+crdr_t_reset( 0 );
+
+/* ====== B3. customers whose message cannot be built are set aside, they do not starve the rest */
+echo "== unbuildable messages\n";
+// a PER-CUSTOMER failure: the discount code cannot be saved for these customers (test-only filter that throws, like a database fault; production code has no seam)
+$GLOBALS['crdr_t_bad'] = array();
+add_filter( 'wp_insert_post_empty_content', function ( $empty, $postarr ) {
+	if ( isset( $postarr['post_type'] ) && 'shop_coupon' === $postarr['post_type'] ) {
+		foreach ( $GLOBALS['crdr_t_bad'] as $k ) {
+			if ( false !== strpos( (string) ( isset( $postarr['post_excerpt'] ) ? $postarr['post_excerpt'] : '' ), $k ) ) {
+				throw new RuntimeException( 'simulated database failure for ' . $k ); // what a real DB fault looks like to the caller
+			}
+		}
+	}
+	return $empty;
+}, 10, 2 );
+$offer_cfg = array( 'mode' => 'manual', 'offer' => array( 'type' => 'percent', 'percent' => 10, 'days' => 5 ), 'template' => 'سلام {name}، کد {coupon}' );
+$bad3      = array( 'p:09120000001', 'p:09120000002', 'p:09120000003' ); // the customers at the very top of the audience
+$scenario  = function () use ( $offer_cfg, $bad3 ) {
+	crdr_t_cfg( $offer_cfg );
+	crdr_t_reset( 10 );
+	$GLOBALS['crdr_t_bad'] = $bad3;
+};
+$clean_html = function ( $h ) {
+	return ! preg_match( '/(Warning|Notice|Deprecated|Fatal error)\s*:/', $h ) && false === strpos( $h, 'Stack trace' );
+};
+$nb = function ( $ck = null ) {
+	return crdr_t_rows( "status = 'nobuild'" . ( $ck ? " AND ckey = '" . esc_sql( $ck ) . "'" : '' ) );
+};
+
+$scenario();
+$coup0 = $coupons();
+$r1    = CRDR_Playbooks::run( 'dormant', 4 );
+t( 'run 1: the three unbuildable customers at the top do not stop the run: customer 4 is still served', 1 === $r1['sent'] && 3 === $r1['failed'], wp_json_encode( $r1, JSON_UNESCAPED_UNICODE ) );
+t( 'run 1: each unbuildable customer has ONE row, status nobuild, with a readable reason', 3 === count( $nb() ) && 3 === count( array_filter( array_column( $nb(), 'error' ), function ( $e ) {
+	return false !== mb_strpos( $e, 'کد تخفیف' );
+} ) ) );
+t( 'run 1: the reason holds no phone number, key or exception text', 0 === count( array_filter( array_column( $nb(), 'error' ), function ( $e ) {
+	return false !== strpos( $e, '0912' ) || false !== strpos( $e, 'p:' );
+} ) ) );
+t( 'run 1: no false contact: no sms ok / pending row and no claim for them', 0 === crdr_t_count( "status IN ('ok','pending','unknown') AND ckey IN ('p:09120000001','p:09120000002','p:09120000003')" ) && 0 === crdr_t_count( 'claim_key IS NOT NULL' ) );
+t( 'run 1: no false cooldown: they are not "recently contacted"', '' === CRDR_DB::blocked_reason( 'p:09120000001' ) && false === CRDR_Actions::in_cooldown( 'p:09120000002' ) );
+t( 'run 1: only the one message that was built was sent, and only one coupon exists for it', 1 === count( crdr_t_requests() ) && $coup0 + 1 === $coupons() );
+$stamp = array_column( $nb(), 'created_ts', 'ckey' );
+
+$r2 = CRDR_Playbooks::run( 'dormant', 4 );
+t( 'run 2: the set-aside customers are skipped, the next four eligible customers progress', 4 === $r2['sent'] && 0 === $r2['failed'], wp_json_encode( $r2, JSON_UNESCAPED_UNICODE ) );
+$r3 = CRDR_Playbooks::run( 'dormant', 4 );
+t( 'run 3: the rest of the audience is served', 2 === $r3['sent'] && 0 === $r3['failed'], wp_json_encode( $r3, JSON_UNESCAPED_UNICODE ) );
+t( 'the set-aside rows were not touched or duplicated by the later runs', $stamp === array_column( $nb(), 'created_ts', 'ckey' ) && 3 === count( $nb() ) );
+t( 'duplicate-send safety holds: 7 customers, 7 messages, nobody twice', 7 === count( crdr_t_requests() ) && 7 === crdr_t_count( "status = 'ok'" ) && 0 === (int) $wpdb->get_var( 'SELECT COUNT(*) FROM (SELECT ckey FROM ' . CRDR_DB::contacts() . " WHERE status = 'ok' GROUP BY ckey HAVING COUNT(*) > 1) d" ) );
+$r4 = CRDR_Playbooks::run( 'dormant', 4 );
+t( 'another run changes nothing (no resend, no new failures)', 0 === $r4['sent'] && 0 === $r4['failed'] && 7 === count( crdr_t_requests() ) );
+
+// visible to the owner
+$html = crdr_t_page( array( 'CRDR_Page_Campaigns', 'render' ), array( 'page' => 'customer-radar-campaigns' ) );
+t( 'campaign card says how many customers are set aside, why, and how to recover', false !== mb_strpos( $html, 'کنار گذاشته' ) && false !== mb_strpos( $html, 'کد تخفیف' ) && false !== mb_strpos( $html, 'ذخیره' ) );
+$cid1 = (int) $wpdb->get_var( 'SELECT id FROM ' . CRDR_DB::customers() . " WHERE ckey = 'p:09120000001'" );
+$html = crdr_t_page( array( 'CRDR_Page_Customers', 'render_detail' ), array( 'page' => 'customer-radar-customer', 'id' => $cid1 ) );
+t( 'the customer page shows the failure, in Persian', $clean_html( $html ) && false !== mb_strpos( $html, 'پیام ساخته نشد' ) );
+$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid1, 'type' => 'sms' ) );
+t( 'a set-aside customer can still be messaged by hand (nothing was "contacted")', true === $j['success'], wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
+
+// recovery 1: the cause is fixed; they stay set aside until something is saved ...
+$scenario();
+CRDR_Playbooks::run( 'dormant', 20 );
+$GLOBALS['crdr_t_bad'] = array();
+$n0 = count( crdr_t_requests() );
+$r  = CRDR_Playbooks::run( 'dormant', 20 );
+t( 'recovery: fixing the cause alone does not hammer them again straight away', 0 === $r['sent'] && $n0 === count( crdr_t_requests() ) );
+// ... saving the campaign lifts it at once
+CRDR_Playbooks::save( 'dormant', array( 'name' => 'خواب', 'mode' => 'manual', 'template' => 'سلام {name}، کد {coupon}', 'offer_type' => 'percent', 'offer_percent' => 10, 'offer_days' => 5, 'daily_cap' => 100 ) );
+$r = CRDR_Playbooks::run( 'dormant', 20 );
+t( 'recovery: saving the campaign lifts the set-aside; the three are served exactly once', 3 === $r['sent'] && 0 === count( $nb() ) + crdr_t_count( "status = 'nobuild'" ), wp_json_encode( $r, JSON_UNESCAPED_UNICODE ) );
+// ... as does switching the mode, saving Settings, or simply waiting out the six hours
+foreach ( array(
+	'mode switch'   => function () {
+		CRDR_Playbooks::set_mode( 'dormant', 'off' );
+		CRDR_Playbooks::set_mode( 'dormant', 'manual' );
+	},
+	'settings save' => function () {
+		CRDR_Settings::save( CRDR_Settings::all() );
+	},
+	'time'          => function () use ( $wpdb ) {
+		$wpdb->query( 'UPDATE ' . CRDR_DB::contacts() . " SET created_ts = created_ts - 25000 WHERE status = 'nobuild'" );
+	},
+) as $how => $lift ) {
+	$scenario();
+	CRDR_Playbooks::run( 'dormant', 20 );
+	$GLOBALS['crdr_t_bad'] = array();
+	$lift();
+	$r = CRDR_Playbooks::run( 'dormant', 20 );
+	t( "recovery by {$how}: the set-aside customers are served again", 3 === $r['sent'] && 0 === $r['failed'], wp_json_encode( $r, JSON_UNESCAPED_UNICODE ) );
+}
+// still broken after the wait: tried again, but still ONE row each
+$scenario();
+CRDR_Playbooks::run( 'dormant', 20 );
+$wpdb->query( 'UPDATE ' . CRDR_DB::contacts() . " SET created_ts = created_ts - 25000 WHERE status = 'nobuild'" );
+$r = CRDR_Playbooks::run( 'dormant', 20 );
+t( 'after the wait a still-broken customer is tried once more and fails again...', 3 === $r['failed'] && 0 === $r['sent'] );
+t( '... and the table does not grow: still exactly one nobuild row per customer', 3 === count( $nb() ) && 3 === crdr_t_count( "status = 'nobuild' AND created_ts > " . ( time() - 60 ) ) );
+
+// a GLOBAL cause (blank store name): at most ten customers are set aside per run, then it stops; no coupon is wasted
+crdr_t_cfg( array_merge( $offer_cfg, array( 'template' => 'سلام {name} از {store} کد {coupon}' ) ) );
+crdr_t_reset( 15 );
+$GLOBALS['crdr_t_bad'] = array();
+$coup0    = $coupons();
+$blogname = get_option( 'blogname' );
+update_option( 'blogname', '' );
+$r = CRDR_Playbooks::run( 'dormant', 50 );
+t( 'global cause: stops after ten in a row, nothing sent', 10 === $r['failed'] && 0 === $r['sent'] && 0 === count( crdr_t_requests() ), wp_json_encode( $r, JSON_UNESCAPED_UNICODE ) );
+t( 'global cause: the reason names the missing value', 10 === crdr_t_count( "status = 'nobuild' AND error LIKE '%{store}%'" ) && false !== mb_strpos( $r['error'], '{store}' ) );
+t( 'global cause: no discount code was created for a message that could not be built', $coup0 === $coupons() );
+update_option( 'blogname', $blogname );
+CRDR_Settings::save( CRDR_Settings::all() );
+$r = CRDR_Playbooks::run( 'dormant', 50 );
+t( 'global cause fixed + settings saved: everyone is served once', 15 === $r['sent'] && 15 === count( crdr_t_requests() ), wp_json_encode( $r, JSON_UNESCAPED_UNICODE ) );
+
+// a message that renders to nothing
+crdr_t_cfg( array( 'mode' => 'manual', 'template' => '{optout}' ), array( 'optout_text' => '' ) );
+crdr_t_reset( 4 );
+$r = CRDR_Playbooks::run( 'dormant', 10 );
+t( 'empty text after filling: nothing sent, set aside as nobuild with a Persian reason', 0 === $r['sent'] && 0 === count( crdr_t_requests() ) && 4 === crdr_t_count( "status = 'nobuild' AND error <> ''" ) && 0 === crdr_t_count( "status = 'failed'" ), wp_json_encode( $r, JSON_UNESCAPED_UNICODE ) );
+
+// gateway failures are a different thing and keep their rule: failed (retryable), stop after three
+crdr_t_cfg( array( 'mode' => 'manual' ), array(), array( 'mode' => 'connect_fail' ) );
+crdr_t_reset( 6 );
+$r = CRDR_Playbooks::run( 'dormant', 10 );
+t( 'gateway definite failure: unchanged (3 failed rows, stops, not set aside)', 3 === $r['failed'] && 3 === crdr_t_count( "status = 'failed'" ) && 0 === crdr_t_count( "status = 'nobuild'" ) );
+remove_all_filters( 'wp_insert_post_empty_content' );
+$GLOBALS['crdr_t_bad'] = array();
 crdr_t_reset( 0 );
 
 /* ====================================================== C. duplicate sends */

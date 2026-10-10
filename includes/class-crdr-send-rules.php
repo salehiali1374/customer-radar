@@ -14,6 +14,20 @@ class CRDR_Send_Rules {
 	 */
 	const MIN_RESEND = 86400;
 
+	/**
+	 * A customer whose message cannot be BUILT (a value is missing, the discount code could not be saved, the text
+	 * is empty) gets status 'nobuild': nothing was sent and it is not a contact. The campaign leaves that customer
+	 * alone for this long, so the same people do not sit at the top of every run and starve the rest. Saving the
+	 * campaign or the settings (see CRDR_Send::build_epoch_bump) lifts it at once.
+	 */
+	const BUILD_BACKOFF = 21600;
+
+	/** A run stops after this many build failures in a row (no success in between): the cause is probably general. */
+	const BUILD_FAIL_STREAK = 10;
+
+	/** Statuses that never count as "customer was contacted" (cooldown, daily cap, audience exclusion). */
+	const NOT_CONTACT = array( 'failed', 'nobuild' );
+
 	/* ------------------------------------------------------------- when to send */
 
 	/** Hour (0-23) of a timestamp in the given timezone. */
@@ -86,6 +100,11 @@ class CRDR_Send_Rules {
 			'override_forbidden' => 'ارسال خارج از ساعت مجاز فقط برای مدیر سایت امکان‌پذیر است.',
 		);
 		return isset( $m[ $code ] ) ? $m[ $code ] : '';
+	}
+
+	/** Set-aside rows newer than this still count. @param int $epoch time of the last settings/campaign change */
+	public static function build_backoff_since( $now, $epoch ) {
+		return max( (int) $now - self::BUILD_BACKOFF, (int) $epoch );
 	}
 
 	/* ------------------------------------------------------------ run log retention */

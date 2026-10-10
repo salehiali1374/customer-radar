@@ -25,6 +25,7 @@ class CRDR_Send {
 	const LOG_OPTION      = 'crdr_run_log';      // runs started by people (the audit trail of overrides lives here)
 	const CRON_LOG_OPTION = 'crdr_cron_log';     // runs started by the scheduler
 	const LOST_OPTION     = 'crdr_run_log_lost'; // how many override entries had to be dropped at the cap (normally 0)
+	const EPOCH_OPTION    = 'crdr_build_epoch';  // time of the last change of settings/campaigns: lifts every "nobuild" set-aside
 
 	/* ------------------------------------------------------------------- run lock */
 
@@ -86,6 +87,9 @@ class CRDR_Send {
 			self::release( $id );
 			return array( 'skip' => $why );
 		}
+		// A new attempt supersedes an earlier "could not build the message": if it fails again a fresh row says so,
+		// if it works the customer is no longer listed as set aside.
+		$wpdb->query( $wpdb->prepare( 'DELETE FROM ' . CRDR_DB::contacts() . " WHERE ckey = %s AND playbook = %s AND status = 'nobuild'", $ckey, $playbook ) ); // phpcs:ignore WordPress.DB.PreparedSQL
 		return array( 'id' => $id );
 	}
 
@@ -119,6 +123,31 @@ class CRDR_Send {
 			(int) $row_id
 		) );
 		return $n > 0;
+	}
+
+	/**
+	 * The message for this claimed customer cannot be built: nothing is sent, nothing counts as a contact, and the
+	 * reason is kept (readable, no personal data). The customer is then left alone by this campaign for
+	 * CRDR_Send_Rules::BUILD_BACKOFF, or until settings/campaigns are saved. claim() removes the previous
+	 * "nobuild" row of the same customer and campaign, so there is one row per pair and retrying never grows the table.
+	 */
+	public static function mark_unbuildable( $row_id, $reason ) {
+		self::finalize( $row_id, 'nobuild', $reason );
+	}
+
+	/** Something that may have caused "nobuild" was changed: let those customers be tried again. */
+	public static function build_epoch_bump() {
+		update_option( self::EPOCH_OPTION, time(), false );
+	}
+
+	/** SQL condition (on customers alias c): this campaign has not set the customer aside recently. */
+	public static function not_set_aside_sql( $playbook, $alias = 'c' ) {
+		global $wpdb;
+		return $wpdb->prepare(
+			'NOT EXISTS (SELECT 1 FROM ' . CRDR_DB::contacts() . " z WHERE z.ckey = {$alias}.ckey AND z.playbook = %s AND z.status = 'nobuild' AND z.created_ts > %d)", // phpcs:ignore WordPress.DB.PreparedSQL
+			$playbook,
+			CRDR_Send_Rules::build_backoff_since( time(), (int) get_option( self::EPOCH_OPTION, 0 ) )
+		);
 	}
 
 	/** Persist what is about to be sent. If this fails nothing is sent. */

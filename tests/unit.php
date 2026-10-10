@@ -409,5 +409,14 @@ check( 'trim: a small log is returned untouched', CRDR_Send_Rules::log_trim( $mk
 check( 'trim: an empty log is fine', CRDR_Send_Rules::log_trim( array() ), array( 'log' => array(), 'evicted' => array() ) );
 check( 'merge: two stores read back as one chronological list', array_column( CRDR_Send_Rules::log_merge( $mk( 2, 'manual', 'ran', false, 10 ), $mk( 3, 'cron', 'ran', false, 9 ) ), 'ts' ), array( 9, 10, 10, 11, 11 ) );
 
+/* ---- customers whose message cannot be built are set aside for a while, not retried on every run ---- */
+check( 'set-aside: lasts six hours by default', CRDR_Send_Rules::BUILD_BACKOFF, 21600 );
+check( 'set-aside: a run gives up on building after ten failures in a row', CRDR_Send_Rules::BUILD_FAIL_STREAK, 10 );
+check( 'set-aside: counted from (now - 6h) when nothing was changed since', CRDR_Send_Rules::build_backoff_since( 100000, 0 ), 100000 - 21600 );
+check( 'set-aside: a settings/campaign change AFTER that point lifts every earlier set-aside', CRDR_Send_Rules::build_backoff_since( 100000, 99000 ), 99000 );
+check( 'set-aside: an old change does not shorten the wait', CRDR_Send_Rules::build_backoff_since( 100000, 10 ), 100000 - 21600 );
+check( 'set-aside: a row made at the very moment of the change is lifted too (strictly newer only)', array( 99000 > CRDR_Send_Rules::build_backoff_since( 100000, 99000 ), 99001 > CRDR_Send_Rules::build_backoff_since( 100000, 99000 ) ), array( false, true ) );
+check( 'set-aside: "nobuild" is not a contact (listed with failed as not-contacted)', CRDR_Send_Rules::NOT_CONTACT, array( 'failed', 'nobuild' ) );
+
 echo "\n$pass passed, $fail failed\n";
 exit( $fail ? 1 : 0 );

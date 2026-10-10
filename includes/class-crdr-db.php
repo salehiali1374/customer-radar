@@ -156,6 +156,11 @@ class CRDR_DB {
 	}
 
 	/** SQL fragments (already prepared) that hide recently contacted and opted-out customers. */
+	/** SQL list of the statuses that are not a contact: 'failed','nobuild'. */
+	public static function not_contact() {
+		return "'" . implode( "','", CRDR_Send_Rules::NOT_CONTACT ) . "'";
+	}
+
 	public static function exclusions_sql( $alias = 'c', $cooldown_days = null ) {
 		global $wpdb;
 		$k    = self::contacts();
@@ -163,13 +168,13 @@ class CRDR_DB {
 		$out  = array( "NOT EXISTS (SELECT 1 FROM {$k} x WHERE x.ckey = {$alias}.ckey AND x.kind = 'optout')" );
 		if ( $days > 0 ) {
 			$out[] = $wpdb->prepare(
-				"NOT EXISTS (SELECT 1 FROM {$k} y WHERE y.ckey = {$alias}.ckey AND y.kind IN ('sms','called','skip') AND y.status <> 'failed' AND y.created_ts > %d)", // phpcs:ignore WordPress.DB.PreparedSQL
+				"NOT EXISTS (SELECT 1 FROM {$k} y WHERE y.ckey = {$alias}.ckey AND y.kind IN ('sms','called','skip') AND y.status NOT IN ( " . self::not_contact() . " ) AND y.created_ts > %d)", // phpcs:ignore WordPress.DB.PreparedSQL
 				time() - $days * DAY_IN_SECONDS
 			);
 		} else {
 			// "0 days" must not mean "message the same people again on every run": keep a fixed safety floor for SMS.
 			$out[] = $wpdb->prepare(
-				"NOT EXISTS (SELECT 1 FROM {$k} y WHERE y.ckey = {$alias}.ckey AND y.kind = 'sms' AND y.status <> 'failed' AND y.created_ts > %d)", // phpcs:ignore WordPress.DB.PreparedSQL
+				"NOT EXISTS (SELECT 1 FROM {$k} y WHERE y.ckey = {$alias}.ckey AND y.kind = 'sms' AND y.status NOT IN ( " . self::not_contact() . " ) AND y.created_ts > %d)", // phpcs:ignore WordPress.DB.PreparedSQL
 				time() - CRDR_Send_Rules::MIN_RESEND
 			);
 		}
@@ -192,8 +197,9 @@ class CRDR_DB {
 		$days  = null === $cooldown_days ? (int) CRDR_Settings::get( 'cooldown_days' ) : (int) $cooldown_days;
 		$kinds = $days > 0 ? "'sms','called','skip'" : "'sms'";
 		$since = time() - ( $days > 0 ? $days * DAY_IN_SECONDS : CRDR_Send_Rules::MIN_RESEND );
+		$not   = self::not_contact();
 		$hit   = $wpdb->get_var( $wpdb->prepare(
-			"SELECT 1 FROM {$k} WHERE ckey = %s AND kind IN ({$kinds}) AND status <> 'failed' AND id <> %d AND created_ts > %d LIMIT 1", // phpcs:ignore WordPress.DB.PreparedSQL
+			"SELECT 1 FROM {$k} WHERE ckey = %s AND kind IN ({$kinds}) AND status NOT IN ( {$not} ) AND id <> %d AND created_ts > %d LIMIT 1", // phpcs:ignore WordPress.DB.PreparedSQL
 			$ckey,
 			(int) $exclude_id,
 			$since

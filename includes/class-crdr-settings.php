@@ -43,6 +43,7 @@ class CRDR_Settings {
 	public static function save( array $in ) {
 		$out = self::sanitize( $in );
 		update_option( self::OPTION, $out, false );
+		CRDR_Send::build_epoch_bump(); // e.g. a fixed message text: customers set aside as "unbuildable" are tried again.
 		return $out;
 	}
 

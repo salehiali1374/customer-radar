@@ -163,6 +163,7 @@ class CRDR_Playbooks {
 		$saved[ $id ] = $cfg;
 		// Built-in audience overrides replace the default audience entirely.
 		update_option( self::OPTION, $saved, false );
+		CRDR_Send::build_epoch_bump(); // a fixed text/offer: customers whose message could not be built are tried again.
 		return true;
 	}
 
@@ -236,6 +237,7 @@ class CRDR_Playbooks {
 		$saved[ $id ] = isset( $saved[ $id ] ) && is_array( $saved[ $id ] ) ? $saved[ $id ] : array();
 		$saved[ $id ]['mode'] = $mode;
 		update_option( self::OPTION, $saved, false );
+		CRDR_Send::build_epoch_bump();
 		return true;
 	}
 
@@ -349,6 +351,23 @@ class CRDR_Playbooks {
 		$render = CRDR_Actions::render_checked( $pb['template'], $cust, $extra );
 		$msg    = trim( preg_replace( '/\s+/u', ' ', $render['text'] ) );
 		return array( $msg, 'XXXXXXXX' === $code ? '' : $code, $render );
+	}
+
+	/**
+	 * Customers this campaign currently leaves alone because their message could not be built.
+	 *
+	 * @return array count (int), reason (the latest reason, '' when none)
+	 */
+	public static function set_aside( $id ) {
+		global $wpdb;
+		$since = CRDR_Send_Rules::build_backoff_since( time(), (int) get_option( CRDR_Send::EPOCH_OPTION, 0 ) );
+		$k     = CRDR_DB::contacts();
+		$n     = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(DISTINCT ckey) FROM {$k} WHERE playbook = %s AND status = 'nobuild' AND created_ts > %d", $id, $since ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+		if ( ! $n ) {
+			return array( 'count' => 0, 'reason' => '' );
+		}
+		$why = (string) $wpdb->get_var( $wpdb->prepare( "SELECT error FROM {$k} WHERE playbook = %s AND status = 'nobuild' AND created_ts > %d ORDER BY id DESC LIMIT 1", $id, $since ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+		return array( 'count' => $n, 'reason' => $why );
 	}
 
 	/* ---------------------------------------------------------------- preview */
@@ -479,9 +498,11 @@ class CRDR_Playbooks {
 		$take     = min( $limit, 50 );
 		$cooldown = isset( $pb['cooldown'] ) ? (int) $pb['cooldown'] : null;
 		$rows     = $wpdb->get_results( $wpdb->prepare(
-			'SELECT * FROM ' . CRDR_DB::customers() . ' c ' . CRDR_Audience::where( self::filter( $pb ) ) . ' ORDER BY c.priority DESC, c.total_spent DESC LIMIT %d', // phpcs:ignore WordPress.DB.PreparedSQL
+			'SELECT * FROM ' . CRDR_DB::customers() . ' c ' . CRDR_Audience::where( self::filter( $pb ) ) . ' AND ' . CRDR_Send::not_set_aside_sql( $id ) . ' ORDER BY c.priority DESC, c.total_spent DESC LIMIT %d', // phpcs:ignore WordPress.DB.PreparedSQL
 			$take * 2
 		), ARRAY_A );
+		$streak   = 0; // build failures in a row
+		$gw_fails = 0; // gateway said "definitely not sent"
 
 		foreach ( $rows as $cust ) {
 			if ( $res['sent'] >= $left || $res['sent'] + $res['held_out'] + $res['skipped'] + $res['failed'] >= $take ) {
@@ -516,23 +537,26 @@ class CRDR_Playbooks {
 				CRDR_Send::release( $row );
 				break;
 			}
+			// Can the message be built at all? Check with a placeholder code first, so that no discount code is
+			// created (and left unused) for a customer whose message turns out to be unbuildable.
+			$why = '';
 			try {
-				list( $msg, $code, $render ) = self::compose( $pb, $cust, true, $reco );
-			} catch ( \Throwable $e ) {
-				CRDR_Send::finalize( $row, 'failed', 'ساخت پیام یا کد تخفیف ناموفق بود: ' . $e->getMessage() );
-				$res['failed']++;
-				$res['error'] = 'ساخت پیام یا کد تخفیف ناموفق بود.';
-				if ( $res['failed'] >= 3 ) {
-					break;
+				list( , , $dry ) = self::compose( $pb, $cust, false, $reco );
+				if ( $dry['ok'] ) {
+					list( $msg, $code, $render ) = self::compose( $pb, $cust, true, $reco );
+					$why = $render['ok'] ? ( '' === $msg ? 'متن پیامک پس از جایگزینی متغیرها خالی است.' : '' ) : CRDR_Template::explain( $render );
+				} else {
+					$why = CRDR_Template::explain( $dry );
 				}
-				continue;
+			} catch ( \Throwable $e ) {
+				$why = 'ساخت کد تخفیف یا پیام ناموفق بود (' . get_class( $e ) . ').';
 			}
-			if ( ! $render['ok'] ) { // never send a message with an unfilled placeholder.
-				$why = CRDR_Template::explain( $render );
-				CRDR_Send::finalize( $row, 'failed', $why );
+			if ( '' !== $why ) {
+				// Nothing was sent and nothing counts as contact: set the customer aside instead of retrying on every run.
+				CRDR_Send::mark_unbuildable( $row, $why );
 				$res['failed']++;
 				$res['error'] = $why;
-				if ( $res['failed'] >= 3 ) {
+				if ( ++$streak >= CRDR_Send_Rules::BUILD_FAIL_STREAK ) { // probably a general cause: stop here.
 					break;
 				}
 				continue;
@@ -540,6 +564,7 @@ class CRDR_Playbooks {
 			$out = CRDR_Send::send_claimed( $row, $cust['phone'], $msg, $code );
 			if ( 'sent' === $out['state'] ) {
 				$res['sent']++;
+				$streak = 0; // building works, so a failure further up was about that customer, not general.
 			} elseif ( 'unknown' === $out['state'] ) {
 				// The SMS may have left. Do not retry it and do not carry on blindly: stop and let the owner look.
 				$res['unknown']++;
@@ -548,7 +573,7 @@ class CRDR_Playbooks {
 			} else {
 				$res['failed']++;
 				$res['error'] = $out['error'];
-				if ( $res['failed'] >= 3 ) { // do not hammer a broken gateway.
+				if ( ++$gw_fails >= 3 ) { // do not hammer a broken gateway.
 					break;
 				}
 			}
