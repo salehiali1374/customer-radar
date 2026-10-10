@@ -45,6 +45,8 @@ function crdr_t_reset( $customers = 10 ) {
 	$wpdb->query( 'TRUNCATE TABLE ' . CRDR_DB::customers() );
 	$wpdb->query( 'TRUNCATE TABLE ' . CRDR_DB::contacts() );
 	delete_option( CRDR_Send::LOG_OPTION );
+	delete_option( CRDR_Send::CRON_LOG_OPTION );
+	delete_option( CRDR_Send::LOST_OPTION );
 	@unlink( crdr_t_log_path() );
 	wp_set_current_user( 1 );
 	$now = time();
@@ -422,7 +424,7 @@ $hs   = function () {
 	return isset( $a['dormant'] ) ? $a['dormant'] : array();
 };
 $cronlog = function ( $prefix = 'blocked:' ) {
-	return array_values( array_filter( (array) get_option( CRDR_Send::LOG_OPTION, array() ), function ( $e ) use ( $prefix ) {
+	return array_values( array_filter( (array) get_option( CRDR_Send::CRON_LOG_OPTION, array() ), function ( $e ) use ( $prefix ) {
 		return 'cron' === $e['trigger'] && 0 === strpos( (string) $e['result'], $prefix );
 	} ) );
 };
@@ -433,6 +435,7 @@ $notice = function () {
 $reset_health = function () {
 	delete_option( CRDR_Health::OPTION );
 	delete_option( CRDR_Send::LOG_OPTION );
+	delete_option( CRDR_Send::CRON_LOG_OPTION );
 };
 
 // --- invalid template (e.g. saved by an older version, or edited in the database)
@@ -473,7 +476,7 @@ t( 'a campaign no longer in auto mode is not reported (stale state ignored)', ''
 crdr_t_cfg( array( 'mode' => 'auto', 'template' => 'سلام {nmae}' ) );
 t( 'back in auto mode it is reported again', '' !== $notice() );
 // privacy
-$dump = wp_json_encode( get_option( CRDR_Health::OPTION ) ) . wp_json_encode( get_option( CRDR_Send::LOG_OPTION ) );
+$dump = wp_json_encode( get_option( CRDR_Health::OPTION ) ) . wp_json_encode( get_option( CRDR_Send::LOG_OPTION ) ) . wp_json_encode( get_option( CRDR_Send::CRON_LOG_OPTION ) );
 t( 'nothing personal or secret in the recorded state: no key, phone or message text', false === strpos( $dump, 'TESTKEY' ) && false === strpos( $dump, '0912' ) && false === strpos( $dump, 'nmae' ) && false === mb_strpos( $dump, 'سلام' ) );
 
 // --- recovery: fixed template, next tick executes, the block is cleared and the history says so
@@ -532,7 +535,7 @@ crdr_t_cfg( array( 'mode' => 'auto' ), $closed );
 crdr_t_reset( 3 );
 CRDR_Playbooks::hourly();
 CRDR_Playbooks::hourly();
-t( 'outside the (valid) hours: nothing sent, nothing recorded, nothing logged, no warning', 0 === count( crdr_t_requests() ) && array() === $hs() && array() === (array) get_option( CRDR_Send::LOG_OPTION, array() ) && '' === $notice() );
+t( 'outside the (valid) hours: nothing sent, nothing recorded, nothing logged, no warning', 0 === count( crdr_t_requests() ) && array() === $hs() && array() === (array) get_option( CRDR_Send::LOG_OPTION, array() ) && array() === (array) get_option( CRDR_Send::CRON_LOG_OPTION, array() ) && '' === $notice() );
 crdr_t_cfg( array( 'mode' => 'auto' ), array( 'send_from' => 22, 'send_to' => 6 ) );
 CRDR_Playbooks::hourly();
 CRDR_Playbooks::hourly();
@@ -557,6 +560,104 @@ crdr_t_cfg( array( 'mode' => 'auto' ) );
 CRDR_Playbooks::hourly();
 t( 'state of a campaign that no longer exists is pruned', ! isset( get_option( CRDR_Health::OPTION )['ghost'] ) );
 $reset_health();
+crdr_t_reset( 0 );
+
+/* ============================== A3. the run log: routine cron activity cannot evict audit entries */
+echo "== run log retention\n";
+$caps = CRDR_Send_Rules::log_caps();
+$run  = function () {
+	return (array) get_option( CRDR_Send::LOG_OPTION, array() );
+};
+$cron = function () {
+	return (array) get_option( CRDR_Send::CRON_LOG_OPTION, array() );
+};
+$fresh = function () {
+	delete_option( CRDR_Send::LOG_OPTION );
+	delete_option( CRDR_Send::CRON_LOG_OPTION );
+	delete_option( CRDR_Send::LOST_OPTION );
+};
+
+// a real administrator override, then a long stretch of real cron ticks
+$fresh();
+crdr_t_cfg( array( 'mode' => 'auto' ), $closed );
+crdr_t_reset( 3 );
+$r = CRDR_Playbooks::run( 'dormant', 6, array( 'trigger' => 'manual', 'override_window' => true ) );
+$ov = array_values( array_filter( $run(), function ( $e ) {
+	return ! empty( $e['override'] );
+} ) );
+t( 'override run: recorded in the people log, with who and that the hours were bypassed', 1 === count( $ov ) && 1 === (int) $ov[0]['user'] && 'ran' === $ov[0]['result'], wp_json_encode( $run() ) );
+crdr_t_cfg( array( 'mode' => 'auto' ) ); // open window
+$wpdb->query( 'TRUNCATE TABLE ' . CRDR_DB::customers() ); // nothing to send: every tick is a routine "ran" (the log is kept)
+$fresh_run = $run();
+foreach ( range( 1, 40 ) as $i ) {
+	CRDR_Playbooks::hourly();
+}
+t( 'real cron ticks write to the cron log, not to the people log', count( $cron() ) > 0 && $run() === $fresh_run );
+t( 'real cron ticks are bounded by the routine cap', count( $cron() ) <= $caps['routine'] && count( $cron() ) > 0, (string) count( $cron() ) );
+foreach ( range( 1, 1000 ) as $i ) { // far more than the whole log holds
+	CRDR_Send::log_run( array( 'run' => 'x' . $i, 'ts' => time(), 'playbook' => 'dormant', 'trigger' => 'cron', 'user' => 0, 'mode' => 'auto', 'in_window' => true, 'override' => false, 'result' => 'ran', 'counts' => array( 'sent' => 0 ) ) );
+}
+t( 'after 1000 more routine ticks the override entry is still there, unchanged', $run() === $fresh_run && ! empty( array_filter( $run(), function ( $e ) {
+	return ! empty( $e['override'] );
+} ) ) );
+t( 'the cron log never grows past its routine cap', count( $cron() ) === $caps['routine'] );
+t( 'nothing important was lost, so no loss is reported', 0 === (int) get_option( CRDR_Send::LOST_OPTION, 0 ) );
+
+// cron state changes survive routine noise
+$fresh();
+CRDR_Health::record_block( 'dormant', 'template' );
+$ev0 = $cron();
+foreach ( range( 1, 500 ) as $i ) {
+	CRDR_Send::log_run( array( 'run' => 'y' . $i, 'ts' => time(), 'playbook' => 'dormant', 'trigger' => 'cron', 'user' => 0, 'mode' => 'auto', 'in_window' => true, 'override' => false, 'result' => 'ran' ) );
+}
+t( 'a cron "blocked" event is not evicted by routine ticks', 1 === count( array_filter( $cron(), function ( $e ) {
+	return 'blocked:template' === $e['result'];
+} ) ) );
+
+// ordinary manual clicks cannot evict overrides either; the audit class is bounded and reports a loss
+$fresh();
+$mkm = function ( $i, $override ) {
+	return array( 'run' => 'm' . $i, 'ts' => time(), 'playbook' => 'dormant', 'trigger' => 'manual', 'user' => 1, 'mode' => 'manual', 'in_window' => ! $override, 'override' => $override, 'result' => $override ? 'ran' : 'blocked:mode_off' );
+};
+CRDR_Send::log_run( $mkm( 0, true ) );
+foreach ( range( 1, $caps['action'] * 3 ) as $i ) {
+	CRDR_Send::log_run( $mkm( $i, false ) );
+}
+t( 'hundreds of refused manual clicks do not evict the override', 1 === count( array_filter( $run(), function ( $e ) {
+	return ! empty( $e['override'] );
+} ) ) && count( $run() ) === 1 + $caps['action'] );
+foreach ( range( 1, $caps['override'] + 10 ) as $i ) {
+	CRDR_Send::log_run( $mkm( 1000 + $i, true ) );
+}
+$ovs = array_values( array_filter( $run(), function ( $e ) {
+	return ! empty( $e['override'] );
+} ) );
+t( 'the audit class is bounded and keeps the newest entries', count( $ovs ) === $caps['override'] && 'm' . ( 1000 + $caps['override'] + 10 ) === end( $ovs )['run'] );
+t( 'evicting audit entries is never silent: the loss is counted', 11 === (int) get_option( CRDR_Send::LOST_OPTION, 0 ), (string) get_option( CRDR_Send::LOST_OPTION, 0 ) );
+
+// size is bounded
+$bytes = strlen( maybe_serialize( $run() ) ) + strlen( maybe_serialize( $cron() ) );
+t( 'the whole log stays small (under 200 KB at its caps)', $bytes < 200000, (string) $bytes );
+
+// the reader
+$fresh();
+CRDR_Send::log_run( $mkm( 1, true ) );
+CRDR_Health::record_block( 'dormant', 'busy' );
+CRDR_Send::log_run( $mkm( 2, false ) );
+$all = CRDR_Send::log_entries();
+t( 'log_entries(): both logs read back as one list, oldest first', 3 === count( $all ) && $all === CRDR_Send_Rules::log_merge( $run(), $cron() ) );
+
+// nothing sensitive can be stored
+$fresh();
+CRDR_Send::log_run( array_merge( $mkm( 1, true ), array( 'phone' => '09125550101', 'message' => 'متن خصوصی', 'api_key' => 'TESTKEY-SECRET', 'counts' => array( 'sent' => 2, 'phone' => '0912' ) ) ) );
+$raw = wp_json_encode( $run() );
+t( 'log_run() drops phone, message text and keys even if a caller passes them', false === strpos( $raw, '0912555' ) && false === mb_strpos( $raw, 'خصوصی' ) && false === strpos( $raw, 'SECRET' ) && false !== strpos( $raw, '"sent":2' ), $raw );
+
+// a corrupted option must not break sending or lose the new entry
+update_option( CRDR_Send::LOG_OPTION, 'garbage', false );
+CRDR_Send::log_run( $mkm( 9, true ) );
+t( 'a corrupted log option is replaced, the new entry is kept', 1 === count( $run() ) && 'm9' === $run()[0]['run'] );
+$fresh();
 crdr_t_reset( 0 );
 
 /* ====================================================== C. duplicate sends */

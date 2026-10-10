@@ -358,5 +358,56 @@ foreach ( array( 'template', 'no_provider', 'window_invalid', 'other' ) as $code
 check( 'health: outside the sending hours is expected, never recorded', CRDR_Health::is_recorded( 'outside_window' ), false );
 check( 'health: every real reason is recorded', array_map( array( 'CRDR_Health', 'is_recorded' ), array( 'template', 'no_provider', 'busy', 'window_invalid', 'not_auto', 'mode_off' ) ), array( true, true, true, true, true, true ) );
 
+/* ---- run log: which entries matter, and how many of each are kept ---- */
+$e = function ( $trigger, $result, $override = false, $extra = array() ) {
+	return array_merge( array( 'run' => 'r', 'ts' => 1, 'playbook' => 'dormant', 'trigger' => $trigger, 'user' => 'manual' === $trigger ? 1 : 0, 'mode' => 'auto', 'in_window' => true, 'override' => $override, 'result' => $result ), $extra );
+};
+check( 'log class: an override of the hours is the audit class', CRDR_Send_Rules::log_class( $e( 'manual', 'ran', true ) ), 'override' );
+check( 'log class: a refused override attempt is NOT an override (nothing was bypassed)', CRDR_Send_Rules::log_class( $e( 'manual', 'blocked:override_forbidden', false ) ), 'action' );
+check( 'log class: any other manual click is an action', array( CRDR_Send_Rules::log_class( $e( 'manual', 'ran' ) ), CRDR_Send_Rules::log_class( $e( 'manual', 'blocked:mode_off' ) ) ), array( 'action', 'action' ) );
+check( 'log class: cron state changes are events', array( CRDR_Send_Rules::log_class( $e( 'cron', 'blocked:template' ) ), CRDR_Send_Rules::log_class( $e( 'cron', 'recovered' ) ) ), array( 'event', 'event' ) );
+check( 'log class: a routine cron tick is routine', CRDR_Send_Rules::log_class( $e( 'cron', 'ran' ) ), 'routine' );
+check( 'log class: a malformed entry is never routine (kept as an action)', CRDR_Send_Rules::log_class( array( 'result' => 'ran' ) ), 'action' );
+check( 'log class: override wins even if the trigger is odd', CRDR_Send_Rules::log_class( $e( 'weird', 'ran', true ) ), 'override' );
+check( 'log store: people and cron write to different options (they cannot overwrite each other)', array(
+	CRDR_Send_Rules::log_store( 'override' ), CRDR_Send_Rules::log_store( 'action' ), CRDR_Send_Rules::log_store( 'event' ), CRDR_Send_Rules::log_store( 'routine' ),
+), array( 'run', 'run', 'cron', 'cron' ) );
+$caps = CRDR_Send_Rules::log_caps();
+check( 'log caps: the audit class is the largest and every class is bounded', $caps['override'] > $caps['action'] && $caps['override'] > $caps['event'] && $caps['routine'] <= $caps['event'] && min( $caps ) > 0 && array_sum( $caps ) <= 600, true );
+
+$clean = CRDR_Send_Rules::log_clean( $e( 'manual', 'ran', true, array( 'phone' => '09120000001', 'message' => 'سلام', 'api_key' => 'SECRET', 'counts' => array( 'sent' => '4', 'failed' => 1, 'evil' => 9, 'phone' => '0912' ) ) ) );
+check( 'log clean: only the known keys survive (no phone, message, key)', array_keys( $clean ), array( 'run', 'ts', 'playbook', 'trigger', 'user', 'mode', 'in_window', 'override', 'result', 'counts' ) );
+check( 'log clean: counts keep only known counters, as integers', $clean['counts'], array( 'sent' => 4, 'failed' => 1 ) );
+check( 'log clean: free text is length-limited', strlen( CRDR_Send_Rules::log_clean( $e( 'cron', str_repeat( 'x', 500 ) ) )['result'] ) <= 60, true );
+
+// retention
+$mk = function ( $n, $trigger, $result, $override, $ts0 ) use ( $e ) {
+	$o = array();
+	for ( $i = 0; $i < $n; $i++ ) {
+		$o[] = $e( $trigger, $result, $override, array( 'ts' => $ts0 + $i ) );
+	}
+	return $o;
+};
+$log = array_merge( $mk( 5, 'manual', 'ran', true, 100 ), $mk( 1000, 'cron', 'ran', false, 1000 ) );
+$t   = CRDR_Send_Rules::log_trim( $log );
+$by  = array_count_values( array_map( array( 'CRDR_Send_Rules', 'log_class' ), $t['log'] ) );
+check( 'trim: a flood of routine ticks never evicts an override entry', array( $by['override'], $by['routine'] ), array( 5, $caps['routine'] ) );
+check( 'trim: the routine tier keeps the NEWEST entries', end( $t['log'] )['ts'], 1999 );
+check( 'trim: only routine entries were evicted, and they are counted', $t['evicted'], array( 'routine' => 1000 - $caps['routine'] ) );
+$t = CRDR_Send_Rules::log_trim( $mk( $caps['override'] + 7, 'manual', 'ran', true, 1 ) );
+check( 'trim: the audit class itself is bounded, oldest first, and the loss is reported', array( count( $t['log'] ), $t['log'][0]['ts'], $t['evicted'] ), array( $caps['override'], 8, array( 'override' => 7 ) ) );
+$t = CRDR_Send_Rules::log_trim( array_merge( $mk( 3, 'cron', 'blocked:template', false, 1 ), $mk( 500, 'cron', 'ran', false, 100 ) ) );
+check( 'trim: cron state changes survive routine noise', count( array_filter( $t['log'], function ( $x ) {
+	return 'blocked:template' === $x['result'];
+} ) ), 3 );
+$t = CRDR_Send_Rules::log_trim( array_merge( $mk( 2, 'manual', 'ran', true, 1 ), $mk( 300, 'manual', 'blocked:mode_off', false, 10 ) ) );
+check( 'trim: ordinary manual clicks do not evict overrides either', array( count( array_filter( $t['log'], function ( $x ) {
+	return $x['override'];
+} ) ), $t['evicted'] ), array( 2, array( 'action' => 300 - $caps['action'] ) ) );
+check( 'trim: chronological order is preserved', array_column( CRDR_Send_Rules::log_trim( array_merge( $mk( 3, 'manual', 'ran', true, 5 ), $mk( 3, 'cron', 'ran', false, 1 ) ) )['log'], 'ts' ), array( 5, 6, 7, 1, 2, 3 ) );
+check( 'trim: a small log is returned untouched', CRDR_Send_Rules::log_trim( $mk( 3, 'manual', 'ran', false, 1 ) )['evicted'], array() );
+check( 'trim: an empty log is fine', CRDR_Send_Rules::log_trim( array() ), array( 'log' => array(), 'evicted' => array() ) );
+check( 'merge: two stores read back as one chronological list', array_column( CRDR_Send_Rules::log_merge( $mk( 2, 'manual', 'ran', false, 10 ), $mk( 3, 'cron', 'ran', false, 9 ) ), 'ts' ), array( 9, 10, 10, 11, 11 ) );
+
 echo "\n$pass passed, $fail failed\n";
 exit( $fail ? 1 : 0 );

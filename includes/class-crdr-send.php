@@ -22,8 +22,9 @@ defined( 'ABSPATH' ) || exit;
 class CRDR_Send {
 
 	const STALE_AFTER = 600; // seconds a 'pending' claim may live before it is treated as unknown.
-	const LOG_OPTION  = 'crdr_run_log';
-	const LOG_MAX     = 200;
+	const LOG_OPTION      = 'crdr_run_log';      // runs started by people (the audit trail of overrides lives here)
+	const CRON_LOG_OPTION = 'crdr_cron_log';     // runs started by the scheduler
+	const LOST_OPTION     = 'crdr_run_log_lost'; // how many override entries had to be dropped at the cap (normally 0)
 
 	/* ------------------------------------------------------------------- run lock */
 
@@ -180,14 +181,28 @@ class CRDR_Send {
 
 	/* ------------------------------------------------------------------- audit log */
 
-	/** Keep the last runs (who/when/why/how many); an override of the sending hours is always recorded here. */
+	/**
+	 * Record a run (who/when/why/how many; never phone numbers, message text or keys: see CRDR_Send_Rules::log_clean).
+	 * Retention is per class (CRDR_Send_Rules::log_caps), so routine cron ticks cannot push out an override of the
+	 * sending hours. If the audit class itself ever overflows, the oldest entries go and LOST_OPTION counts them.
+	 */
 	public static function log_run( array $entry ) {
-		$log   = get_option( self::LOG_OPTION, array() );
+		$entry = CRDR_Send_Rules::log_clean( $entry );
+		$opt   = 'run' === CRDR_Send_Rules::log_store( CRDR_Send_Rules::log_class( $entry ) ) ? self::LOG_OPTION : self::CRON_LOG_OPTION;
+		$log   = get_option( $opt, array() );
 		$log   = is_array( $log ) ? $log : array();
 		$log[] = $entry;
-		if ( count( $log ) > self::LOG_MAX ) {
-			$log = array_slice( $log, -self::LOG_MAX );
+		$trim  = CRDR_Send_Rules::log_trim( $log );
+		update_option( $opt, $trim['log'], false );
+		if ( ! empty( $trim['evicted']['override'] ) ) {
+			update_option( self::LOST_OPTION, (int) get_option( self::LOST_OPTION, 0 ) + (int) $trim['evicted']['override'], false );
 		}
-		update_option( self::LOG_OPTION, $log, false );
+	}
+
+	/** Both logs as one list, oldest first. */
+	public static function log_entries() {
+		$a = get_option( self::LOG_OPTION, array() );
+		$b = get_option( self::CRON_LOG_OPTION, array() );
+		return CRDR_Send_Rules::log_merge( is_array( $a ) ? $a : array(), is_array( $b ) ? $b : array() );
 	}
 }

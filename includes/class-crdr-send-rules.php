@@ -88,6 +88,99 @@ class CRDR_Send_Rules {
 		return isset( $m[ $code ] ) ? $m[ $code ] : '';
 	}
 
+	/* ------------------------------------------------------------ run log retention */
+
+	/*
+	 * The run log records who ran what. Its entries are not equally important, so each class has its own cap and
+	 * routine entries can never push an important one out:
+	 *   override : a person bypassed the sending hours (the security audit trail)
+	 *   action   : any other manual click or run (who did what)
+	 *   event    : an automatic campaign changed state (blocked, other reason, recovered)
+	 *   routine  : an ordinary cron tick that ran
+	 * People and cron write to different options (log_store), so one can never overwrite the other's entries.
+	 */
+
+	public static function log_caps() {
+		return array( 'override' => 300, 'action' => 100, 'event' => 60, 'routine' => 50 );
+	}
+
+	public static function log_class( array $e ) {
+		if ( ! empty( $e['override'] ) ) {
+			return 'override';
+		}
+		$trigger = isset( $e['trigger'] ) ? $e['trigger'] : '';
+		if ( 'cron' === $trigger ) {
+			return ( isset( $e['result'] ) && 'ran' === $e['result'] ) ? 'routine' : 'event';
+		}
+		return 'action'; // manual, and anything unexpected: never treated as expendable.
+	}
+
+	/** Which option holds this class: 'run' (written by people) or 'cron' (written by the scheduler). */
+	public static function log_store( $class ) {
+		return in_array( $class, array( 'override', 'action' ), true ) ? 'run' : 'cron';
+	}
+
+	/** Keep only known fields: a log entry never carries phone numbers, message text, keys or other free text. */
+	public static function log_clean( array $e ) {
+		$out  = array();
+		$text = array( 'run' => 32, 'playbook' => 64, 'trigger' => 10, 'mode' => 10, 'result' => 60 );
+		foreach ( array( 'run', 'ts', 'playbook', 'trigger', 'user', 'mode', 'in_window', 'override', 'result', 'counts' ) as $k ) {
+			if ( ! array_key_exists( $k, $e ) ) {
+				continue;
+			}
+			if ( isset( $text[ $k ] ) ) {
+				$out[ $k ] = substr( (string) $e[ $k ], 0, $text[ $k ] );
+			} elseif ( 'ts' === $k || 'user' === $k ) {
+				$out[ $k ] = (int) $e[ $k ];
+			} elseif ( 'counts' === $k ) {
+				$c = array();
+				foreach ( array( 'sent', 'held_out', 'skipped', 'failed', 'unknown' ) as $ck ) {
+					if ( is_array( $e['counts'] ) && isset( $e['counts'][ $ck ] ) ) {
+						$c[ $ck ] = (int) $e['counts'][ $ck ];
+					}
+				}
+				$out[ $k ] = $c;
+			} else {
+				$out[ $k ] = (bool) $e[ $k ];
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * Apply the per-class caps, oldest entries of a full class first. Order is preserved.
+	 *
+	 * @return array log (list), evicted (class => number of entries dropped)
+	 */
+	public static function log_trim( array $log ) {
+		$caps    = self::log_caps();
+		$seen    = array();
+		$kept    = array();
+		$evicted = array();
+		for ( $i = count( $log ) - 1; $i >= 0; $i-- ) { // newest first
+			if ( ! is_array( $log[ $i ] ) ) {
+				continue;
+			}
+			$c          = self::log_class( $log[ $i ] );
+			$seen[ $c ] = isset( $seen[ $c ] ) ? $seen[ $c ] + 1 : 1;
+			if ( $seen[ $c ] > $caps[ $c ] ) {
+				$evicted[ $c ] = isset( $evicted[ $c ] ) ? $evicted[ $c ] + 1 : 1;
+				continue;
+			}
+			$kept[] = $log[ $i ];
+		}
+		return array( 'log' => array_reverse( $kept ), 'evicted' => $evicted );
+	}
+
+	/** Several stores read as one list, oldest first. */
+	public static function log_merge( array $a, array $b ) {
+		$all = array_merge( $a, $b );
+		usort( $all, function ( $x, $y ) {
+			return (int) ( isset( $x['ts'] ) ? $x['ts'] : 0 ) - (int) ( isset( $y['ts'] ) ? $y['ts'] : 0 );
+		} );
+		return $all;
+	}
+
 	/* ------------------------------------------------- reading the gateway's answer */
 
 	/** Kavenegar status codes that mean "nothing was sent" (documented at kavenegar.com/rest.html). */

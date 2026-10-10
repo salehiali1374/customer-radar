@@ -9,7 +9,7 @@
  *   last_run : ts, sent, held_out, ...      counts of the latest cron run that actually executed
  *
  * A repeated block only raises count/last, so a campaign stuck for a month is still one record and one log entry;
- * the shared run log (CRDR_Send::log_run) gets an entry only when the state CHANGES (blocked, other reason, recovered).
+ * the cron run log (CRDR_Send::log_run) gets an entry only when the state CHANGES (blocked, other reason, recovered).
  * The admin sees it as a persistent warning (admin_notices, driven by this stored state, not by a transient) and as a
  * line on the campaign card.
  *
