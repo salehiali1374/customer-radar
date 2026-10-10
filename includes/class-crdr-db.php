@@ -10,12 +10,12 @@ defined( 'ABSPATH' ) || exit;
  *                       keyed by customer key, so it survives rebuilds.
  *                       An SMS is first CLAIMED (status 'pending', claim_key set, UNIQUE) and only then sent;
  *                       claim_key is cleared when the outcome is recorded, so at most one send per customer
- *                       can be in flight. status: pending | ok | failed | unknown | holdout | norec.
+ *                       can be in flight. status: pending | ok | unknown | failed | retry | nobuild | rejected | holdout | norec.
  *                       'unknown' = the gateway may have accepted the SMS (timeout); it counts as contacted.
  */
 class CRDR_DB {
 
-	const DB_VERSION = '3';
+	const DB_VERSION = '4'; // 4: data only (see minimize_stored): no schema change since 3
 
 	public static function customers() {
 		global $wpdb;
@@ -118,7 +118,30 @@ class CRDR_DB {
 		// Version 1 kept a simpler log table; nothing was ever released with it.
 		$wpdb->query( 'DROP TABLE IF EXISTS ' . $wpdb->prefix . 'crdr_log' ); // phpcs:ignore WordPress.DB.PreparedSQL
 
+		self::minimize_stored();
+
 		update_option( 'crdr_db_version', self::DB_VERSION );
+	}
+
+	/**
+	 * Data minimisation for rows written by earlier versions (docs/data-retention.md). Idempotent, data only:
+	 *  - the text of an SMS that was never sent (failed / retry / nobuild / rejected) is cleared; ok, unknown and
+	 *    pending rows are not touched;
+	 *  - error texts (the 5,000 newest that have one) lose raw provider wording, API keys and phone numbers.
+	 */
+	public static function minimize_stored() {
+		global $wpdb;
+		$k   = self::contacts();
+		$not = self::not_contact();
+		$wpdb->query( "UPDATE {$k} SET message = '' WHERE status IN ( {$not} ) AND message IS NOT NULL AND message <> ''" ); // phpcs:ignore WordPress.DB.PreparedSQL
+		$secrets = array( CRDR_Settings::get( 'kavenegar_key' ) );
+		$rows    = $wpdb->get_results( "SELECT id, error FROM {$k} WHERE error <> '' ORDER BY id DESC LIMIT 5000", ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL
+		foreach ( (array) $rows as $r ) {
+			$clean = CRDR_Send_Rules::clean_error( $r['error'], $secrets );
+			if ( $clean !== $r['error'] ) {
+				$wpdb->update( $k, array( 'error' => $clean ), array( 'id' => (int) $r['id'] ), array( '%s' ), array( '%d' ) );
+			}
+		}
 	}
 
 	public static function maybe_upgrade() {

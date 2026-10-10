@@ -10,7 +10,7 @@ defined( 'ABSPATH' ) || exit;
  *                      Right after winning, the opt-out / cooldown rules are checked again (the audience may
  *                      have been selected earlier, and another run may have finished since).
  *   2. send_claimed()  store message + localid on the row, THEN call the gateway, then record the outcome.
- *   3. finalize()      status ok | failed | unknown, claim_key cleared.
+ *   3. finalize()      status ok | unknown | a failed kind, claim_key cleared. A message that was NOT sent loses its text.
  *
  * Nothing is ever re-sent automatically. A row left 'pending' by a crashed process is turned into 'unknown'
  * by recover_stale(); 'unknown' counts as contacted (cooldown + daily cap), so the customer is not messaged again.
@@ -117,8 +117,10 @@ class CRDR_Send {
 	 */
 	public static function finalize( $row_id, $status, $error = '' ) {
 		global $wpdb;
-		$n = $wpdb->query( $wpdb->prepare(
-			'UPDATE ' . CRDR_DB::contacts() . " SET status = %s, error = %s, claim_key = NULL WHERE id = %d AND status IN ('pending','unknown')", // phpcs:ignore WordPress.DB.PreparedSQL
+		// Nothing was sent: the text of that message is not kept (the reason is). ok / unknown / holdout keep what they have.
+		$clear = in_array( $status, CRDR_Send_Rules::NOT_CONTACT, true ) ? ", message = ''" : '';
+		$n     = $wpdb->query( $wpdb->prepare(
+			'UPDATE ' . CRDR_DB::contacts() . " SET status = %s, error = %s{$clear}, claim_key = NULL WHERE id = %d AND status IN ('pending','unknown')", // phpcs:ignore WordPress.DB.PreparedSQL
 			$status,
 			mb_substr( (string) $error, 0, 255 ),
 			(int) $row_id

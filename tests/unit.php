@@ -508,5 +508,16 @@ check( 'outcome: the contact flag agrees with the not-contact list used by the S
 	return ! $oc( $s )['contact'];
 } ) ), array( 'failed', 'retry', 'nobuild', 'rejected' ) );
 
+/* ---- data minimisation: what may stay in a stored error text ---- */
+check( 'network error: only the cURL number is kept, never the text (it may carry the request URL)', CRDR_Send_Rules::transport_summary( 'cURL error 28: Operation timed out after 20001 milliseconds for https://api.kavenegar.com/v1/KEY/sms/send.json?receptor=09123456789' ), 'خطای شبکه (cURL 28)' );
+check( 'network error: a WordPress error code without a cURL number keeps only a safe code', CRDR_Send_Rules::transport_summary( 'A valid URL was not provided.', 'http_request_failed' ), 'خطای اتصال (http_request_failed)' );
+check( 'network error: an odd code is cleaned, nothing is left to leak', CRDR_Send_Rules::transport_summary( 'x', "bad code <script> 0912" ), 'خطای اتصال' );
+check( 'network error: no text at all is fine', CRDR_Send_Rules::transport_summary( '' ), 'خطای اتصال' );
+check( 'clean_error: an old "provider text" error becomes our own wording with the code', CRDR_Send_Rules::clean_error( 'کاوه‌نگار (411): شماره گیرنده پیام معتبر نمی باشد 09123456789', array() ), CRDR_Send_Rules::failure_reason( 411 ) );
+check( 'clean_error: key and phone numbers are removed from any other text', CRDR_Send_Rules::clean_error( 'failed https://x/v1/SECRETKEY99/y for 09123456789', array( 'SECRETKEY99' ) ), 'failed https://x/v1/***/y for [شماره]' );
+check( 'clean_error: a clean text is returned unchanged (idempotent)', CRDR_Send_Rules::clean_error( CRDR_Send_Rules::failure_reason( 418 ), array( 'SECRETKEY99' ) ), CRDR_Send_Rules::failure_reason( 418 ) );
+check( 'clean_error: running it twice changes nothing', CRDR_Send_Rules::clean_error( CRDR_Send_Rules::clean_error( 'کاوه‌نگار (418): x', array() ), array() ), CRDR_Send_Rules::failure_reason( 418 ) );
+check( 'clean_error: the result fits the 255-character column', mb_strlen( CRDR_Send_Rules::clean_error( str_repeat( 'ا', 600 ), array() ) ) <= 255, true );
+
 echo "\n$pass passed, $fail failed\n";
 exit( $fail ? 1 : 0 );

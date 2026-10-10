@@ -313,6 +313,27 @@ class CRDR_Send_Rules {
 		return $why . ' (کاوه‌نگار، کد ' . $status . ').';
 	}
 
+	/** A network error reduced to what is safe to keep: its cURL number, never its text (that may carry the request URL). */
+	public static function transport_summary( $message, $code = '' ) {
+		if ( preg_match( '/cURL error (\d+)/i', (string) $message, $m ) ) {
+			return 'خطای شبکه (cURL ' . (int) $m[1] . ')';
+		}
+		$code = (string) $code;
+		return ( '' !== $code && preg_match( '/^[a-z0-9_]{1,40}$/', $code ) ) ? 'خطای اتصال (' . $code . ')' : 'خطای اتصال';
+	}
+
+	/**
+	 * Bring an error text that an older version stored into line with what is kept now: "کاوه‌نگار (411): <provider
+	 * text>" becomes our own wording with the code, and keys / phone numbers are removed. Idempotent.
+	 */
+	public static function clean_error( $text, array $secrets = array() ) {
+		$text = (string) $text;
+		if ( preg_match( '/^کاوه‌نگار \((\d+)\):/u', $text, $m ) ) {
+			return self::failure_reason( (int) $m[1] );
+		}
+		return mb_substr( self::redact( $text, $secrets ), 0, 255 );
+	}
+
 	/**
 	 * Remove what must never be stored or shown from a text that came from outside: secrets (the API key) and
 	 * Iranian mobile numbers in their usual spellings (also with Persian / Arabic digits).

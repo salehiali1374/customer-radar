@@ -147,7 +147,7 @@ $cols = $wpdb->get_col( 'SHOW COLUMNS FROM ' . CRDR_DB::contacts(), 0 );
 t( 'new columns exist', ! array_diff( array( 'run_id', 'localid', 'claim_key' ), $cols ), implode( ',', $cols ) );
 $idx = $wpdb->get_results( 'SHOW INDEX FROM ' . CRDR_DB::contacts() . " WHERE Key_name = 'claim_key'", ARRAY_A );
 t( 'claim_key is a UNIQUE index', $idx && 0 === (int) $idx[0]['Non_unique'] );
-t( 'schema version is 3', '3' === get_option( 'crdr_db_version' ) );
+t( 'schema version is 4 (3 -> 4 only cleans stored data, no schema change)', '4' === get_option( 'crdr_db_version' ) );
 
 // Upgrade from the previous schema: old table shape + one legacy row survive and gain the new columns.
 $wpdb->query( 'ALTER TABLE ' . CRDR_DB::contacts() . ' DROP INDEX claim_key, DROP COLUMN claim_key, DROP COLUMN localid, DROP COLUMN run_id' );
@@ -1129,6 +1129,132 @@ t( 'one-off SMS with a timeout: not a success, says it may have gone out, and do
 $js = file_get_contents( CRDR_DIR . 'assets/admin.js' );
 t( 'the run log shown in the browser says "accepted", not "sent"', false !== mb_strpos( $js, 'پذیرفته' ) && false === mb_strpos( $js, "line('ارسال: '" ) );
 $wpdb->query( 'TRUNCATE TABLE ' . CRDR_DB::orders() );
+crdr_t_reset( 0 );
+
+/* ============================ B6. data minimisation: no text for an SMS that was never sent ============================ */
+echo "== data minimisation\n";
+if ( ! function_exists( 'PWSMS' ) ) { // a stand-in for the Persian WooCommerce SMS plugin, only used when a test selects it
+	class CRDR_T_Pwsms {
+		public function send_sms( $args ) {
+			$b = isset( $GLOBALS['crdr_t_pwsms'] ) ? $GLOBALS['crdr_t_pwsms'] : 'ok';
+			if ( 'throw' === $b ) {
+				throw new RuntimeException( 'internal error for 09120000001 with key TESTKEY' );
+			}
+			return 'ok' === $b ? true : $b;
+		}
+	}
+	function PWSMS() {
+		return new CRDR_T_Pwsms();
+	}
+}
+$msgs = function () {
+	$o = array();
+	foreach ( crdr_t_rows( "kind = 'sms'" ) as $r ) {
+		$o[ $r['status'] ][] = $r;
+	}
+	return $o;
+};
+crdr_t_cfg( array( 'mode' => 'manual', 'offer' => array( 'type' => 'percent', 'percent' => 10, 'days' => 5 ), 'template' => 'سلام {name}، کد {coupon}' ), array(), array(
+	'mode' => 'ok', 'by_phone' => array( '09120000001' => 'invalid_receptor', '09120000002' => 'bad_text', '09120000003' => 'op_failed', '09120000004' => 'timeout', '09120000005' => 'connect_fail' ),
+) );
+crdr_t_reset( 9 );
+CRDR_Playbooks::run( 'dormant', 8 ); // c1 rejected, c2 refused text, c3 unexplained, c4 timeout -> stops
+CRDR_Playbooks::run( 'dormant', 8 ); // c5 network failure, the rest accepted
+$by = $msgs();
+foreach ( array( 'rejected', 'nobuild', 'retry', 'failed' ) as $stt ) {
+	$rows = isset( $by[ $stt ] ) ? $by[ $stt ] : array();
+	t( "minimised: '{$stt}' (nothing was sent) keeps NO message text", 1 === count( $rows ) && '' === (string) $rows[0]['message'] && '' !== $rows[0]['error'], wp_json_encode( $rows, JSON_UNESCAPED_UNICODE ) );
+}
+t( 'minimised: the discount code of an unsent message is kept so that the unused code can be found', '' !== $by['rejected'][0]['coupon'] && '' !== $by['failed'][0]['coupon'] );
+t( 'kept: an accepted SMS keeps its text (the record of what the customer was sent)', count( $by['ok'] ) >= 4 && 0 === count( array_filter( $by['ok'], function ( $r ) {
+	return '' === (string) $r['message'] || false === mb_strpos( $r['message'], 'سلام' );
+} ) ) );
+t( 'kept: an unknown outcome keeps its text (it may have gone out; this is how you find out what)', 1 === count( $by['unknown'] ) && false !== mb_strpos( $by['unknown'][0]['message'], 'سلام' ) && '' !== $by['unknown'][0]['localid'] );
+$u = $by['unknown'][0];
+t( 'late answer: an unknown row corrected to ok keeps its text', true === CRDR_Send::finalize( $u['id'], 'ok' ) && $u['message'] === crdr_t_rows( "id = {$u['id']}" )[0]['message'] );
+
+// an interrupted send: the row is still 'pending' with its text; when it is recovered as 'unknown' the text stays
+$pk = CRDR_Send::claim( 'p:09120000099', 'dormant', 'stale' );
+( new ReflectionMethod( 'CRDR_Send', 'annotate' ) )->setAccessible( true );
+$an = new ReflectionMethod( 'CRDR_Send', 'annotate' );
+$an->setAccessible( true );
+$an->invoke( null, $pk['id'], 'سلام نیمه‌کاره', '', '1790000000000000001' );
+$wpdb->query( 'UPDATE ' . CRDR_DB::contacts() . ' SET created_ts = ' . ( time() - 3600 ) . ' WHERE id = ' . (int) $pk['id'] );
+CRDR_Send::recover_stale();
+$pr = crdr_t_rows( 'id = ' . (int) $pk['id'] )[0];
+t( 'an interrupted send recovered as unknown keeps the text that may have gone out', 'unknown' === $pr['status'] && 'سلام نیمه‌کاره' === $pr['message'] );
+$wpdb->query( 'DELETE FROM ' . CRDR_DB::contacts() . ' WHERE id = ' . (int) $pk['id'] );
+
+// admin features still work with the minimised rows
+t( 'cooldown, cap and metrics are untouched by the clearing', 'cooldown' === CRDR_DB::blocked_reason( 'p:09120000006' ) && '' === CRDR_DB::blocked_reason( 'p:09120000001' ) );
+$card = crdr_t_page( array( 'CRDR_Page_Campaigns', 'render' ), array( 'page' => 'customer-radar-campaigns' ) );
+t( 'campaign page: the set-aside lines still work (they read the reason, not the text)', false !== mb_strpos( $card, 'کنار گذاشته' ) );
+$age( 30 ); // old enough for the results page to show the recent sends (it waits for the measurement window)
+$html = crdr_t_page( array( 'CRDR_Page_Campaigns', 'render' ), array( 'page' => 'customer-radar-campaigns', 'results' => 'dormant' ) );
+t( 'recent sends: the reason of an unsent row is shown, the text of an accepted row is shown', false !== mb_strpos( $html, 'شماره‌ی گیرنده از نظر سرویس پیامک معتبر نیست' ) && false !== mb_strpos( $html, 'سلام' ) && false === strpos( $html, 'Warning:' ) );
+$cid1 = (int) $wpdb->get_var( 'SELECT id FROM ' . CRDR_DB::customers() . " WHERE ckey = 'p:09120000001'" );
+$pg   = crdr_t_page( array( 'CRDR_Page_Customers', 'render_detail' ), array( 'page' => 'customer-radar-customer', 'id' => $cid1 ) );
+t( 'customer history: shows the reason for an unsent SMS and no empty text box', false !== mb_strpos( $pg, 'شماره رد شد' ) && false === strpos( $pg, '<div class="crdr-muted"></div>' ) );
+$cid6 = (int) $wpdb->get_var( 'SELECT id FROM ' . CRDR_DB::customers() . " WHERE ckey = 'p:09120000006'" );
+$pg   = crdr_t_page( array( 'CRDR_Page_Customers', 'render_detail' ), array( 'page' => 'customer-radar-customer', 'id' => $cid6 ) );
+t( 'customer history: still shows the text of an accepted SMS', false !== mb_strpos( $pg, 'سلام' ) );
+
+// nothing sensitive anywhere that is stored or logged
+$errs = implode( "\n", $wpdb->get_col( 'SELECT error FROM ' . CRDR_DB::contacts() . " WHERE error <> ''" ) );
+$dump = $errs . wp_json_encode( get_option( CRDR_Send::LOG_OPTION ) ) . wp_json_encode( get_option( CRDR_Send::CRON_LOG_OPTION ) ) . wp_json_encode( get_option( CRDR_Health::OPTION ) );
+t( 'stored errors and logs: no phone number, no key, no URL, no raw provider or cURL text', '' !== $errs && 0 === preg_match( '/09\d{9}|TESTKEY|https?:|kavenegar\.com|Operation timed out|Could not resolve/i', $dump ), $errs );
+t( 'stored errors: a network failure is reduced to its cURL number', 1 === preg_match( '/cURL 6/', $errs ) );
+
+// the other SMS plugin: its raw text is not copied either
+$wpdb->query( 'TRUNCATE TABLE ' . CRDR_DB::contacts() );
+update_option( 'crdr_settings', array_merge( CRDR_Settings::all(), array( 'sms_provider' => 'pwsms' ) ) );
+foreach ( array( 'Invalid credentials for user admin 09120000001 key TESTKEY', 'cURL error 28: timed out 09120000001', 'throw' ) as $n => $behaviour ) {
+	$GLOBALS['crdr_t_pwsms'] = $behaviour;
+	$r = CRDR_Send::claim( 'p:0912000000' . ( $n + 1 ), 'dormant', 'pw' );
+	CRDR_Send::send_claimed( $r['id'], '0912000000' . ( $n + 1 ), 'سلام خصوصی' );
+}
+$rows = crdr_t_rows( "kind = 'sms'" );
+t( 'other SMS plugin: an error text is replaced by our own wording; a timeout / exception is "unknown" with no raw text', 'retry' === $rows[0]['status'] && 'unknown' === $rows[1]['status'] && 'unknown' === $rows[2]['status'] && 0 === preg_match( '/09\d{9}|TESTKEY|Invalid credentials|timed out|internal error/i', implode( "\n", array_column( $rows, 'error' ) ) ), wp_json_encode( array_column( $rows, 'error' ), JSON_UNESCAPED_UNICODE ) );
+t( 'other SMS plugin: its refused SMS keeps no text, its unknown ones keep it', '' === (string) $rows[0]['message'] && '' !== (string) $rows[1]['message'] );
+$GLOBALS['crdr_t_pwsms'] = 'ok';
+crdr_t_reset( 0 );
+
+// upgrade 3 -> 4: rows written by the previous versions are cleaned once, and only those
+$wpdb->query( 'TRUNCATE TABLE ' . CRDR_DB::contacts() );
+$secret = 'KEY-' . wp_rand( 100000, 999999 );
+update_option( 'crdr_settings', array_merge( CRDR_Settings::all(), array( 'kavenegar_key' => $secret ) ) );
+$ins = function ( $ck, $status, $message, $error ) use ( $wpdb ) {
+	$wpdb->insert( CRDR_DB::contacts(), array( 'ckey' => $ck, 'kind' => 'sms', 'playbook' => 'dormant', 'grp' => 'treated', 'message' => $message, 'status' => $status, 'error' => $error, 'created_ts' => time() - 86400 * 3 ) );
+	return (int) $wpdb->insert_id;
+};
+$old = array(
+	'failed'   => $ins( 'p:09121110001', 'failed', 'سلام ۱', 'کاوه‌نگار (418): اعتبار کافی نیست' ),
+	'rejected' => $ins( 'p:09121110002', 'rejected', 'سلام ۲', 'خطا برای 09121110002' ),
+	'nobuild'  => $ins( 'p:09121110003', 'nobuild', 'سلام ۳', 'x ' . $secret . ' y' ),
+	'retry'    => $ins( 'p:09121110004', 'retry', 'سلام ۴', '' ),
+	'ok'       => $ins( 'p:09121110005', 'ok', 'سلام ۵ کد ABC', '' ),
+	'unknown'  => $ins( 'p:09121110006', 'unknown', 'سلام ۶', 'پاسخ مشخص نشد (cURL error 28 09121110006)' ),
+	'pending'  => $ins( 'p:09121110007', 'pending', 'سلام ۷', '' ),
+);
+$wpdb->query( 'UPDATE ' . CRDR_DB::contacts() . " SET claim_key = ckey WHERE status = 'pending'" );
+$before = $wpdb->get_var( 'SELECT COUNT(*) FROM ' . CRDR_DB::contacts() );
+update_option( 'crdr_db_version', '3' );
+CRDR_DB::maybe_upgrade();
+$row = function ( $id ) {
+	return crdr_t_rows( 'id = ' . (int) $id )[0];
+};
+t( 'upgrade 3->4: the version moves to 4', '4' === get_option( 'crdr_db_version' ) );
+t( 'upgrade 3->4: text of SMS that were never sent is cleared (failed, rejected, nobuild, retry)', '' === (string) $row( $old['failed'] )['message'] && '' === (string) $row( $old['rejected'] )['message'] && '' === (string) $row( $old['nobuild'] )['message'] && '' === (string) $row( $old['retry'] )['message'] );
+t( 'upgrade 3->4: ok, unknown and pending rows keep their text, status and claim', 'سلام ۵ کد ABC' === $row( $old['ok'] )['message'] && 'سلام ۶' === $row( $old['unknown'] )['message'] && 'سلام ۷' === $row( $old['pending'] )['message'] && 'pending' === $row( $old['pending'] )['status'] && 'p:09121110007' === $row( $old['pending'] )['claim_key'] );
+t( 'upgrade 3->4: no row was removed and no status changed', (int) $before === (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . CRDR_DB::contacts() ) && 'failed' === $row( $old['failed'] )['status'] && 'rejected' === $row( $old['rejected'] )['status'] );
+t( 'upgrade 3->4: an old "provider text" error becomes our own wording', CRDR_Send_Rules::failure_reason( 418 ) === $row( $old['failed'] )['error'] );
+t( 'upgrade 3->4: phone numbers and the API key are removed from old error texts (also for ok/unknown rows)', false === strpos( $row( $old['rejected'] )['error'], '0912111' ) && false === strpos( $row( $old['nobuild'] )['error'], $secret ) && false === strpos( $row( $old['unknown'] )['error'], '0912111' ) && false !== strpos( $row( $old['unknown'] )['error'], 'cURL error 28' ) );
+$snap = wp_json_encode( crdr_t_rows() );
+update_option( 'crdr_db_version', '3' );
+CRDR_DB::maybe_upgrade();
+t( 'upgrade 3->4: running it again changes nothing', $snap === wp_json_encode( crdr_t_rows() ) );
+t( 'upgrade 3->4: a customer is still resting after the cleaning (cooldown unchanged)', 'cooldown' === CRDR_DB::blocked_reason( 'p:09121110005' ) && '' === CRDR_DB::blocked_reason( 'p:09121110001' ) );
+$wpdb->query( 'TRUNCATE TABLE ' . CRDR_DB::contacts() );
 crdr_t_reset( 0 );
 
 /* ====================================================== C. duplicate sends */

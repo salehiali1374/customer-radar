@@ -107,7 +107,7 @@ class CRDR_SMS {
 			) );
 		} catch ( \Throwable $e ) {
 			// Thrown after the call started: we cannot know whether the gateway got it.
-			return self::result( 'unknown', self::unknown_text( $e->getMessage() ) );
+			return self::result( 'unknown', self::unknown_text( get_class( $e ) ) ); // the exception text is not kept
 		}
 		if ( true === $r ) {
 			return self::result( 'sent' );
@@ -115,10 +115,11 @@ class CRDR_SMS {
 		if ( is_string( $r ) && '' !== $r ) {
 			// That plugin only reports a text; treat a timeout-like text as uncertain, anything else as a plain failure.
 			if ( preg_match( '/time(d)?[ -]?out|cURL error (28|52|56)/i', $r ) ) {
-				return self::result( 'unknown', self::unknown_text( $r ) );
+				return self::result( 'unknown', self::unknown_text( 'زمان انتظار افزونه پیامک ووکامرس تمام شد' ) );
 			}
 			// A text only: it cannot tell a bad number from a broken account, so it is "uncertain" (a bounded set-aside).
-			return self::result( 'failed', $r, 'uncertain' );
+			// The other plugin's wording is not copied (it may contain anything); the owner is pointed to where it is shown.
+			return self::result( 'failed', 'افزونه پیامک ووکامرس خطا برگرداند؛ علتش را در تنظیمات یا گزارش همان افزونه ببینید.', 'uncertain' );
 		}
 		return self::result( 'unknown', self::unknown_text( 'پاسخ نامشخص از افزونه پیامک ووکامرس' ) );
 	}
@@ -146,11 +147,12 @@ class CRDR_SMS {
 			'body'        => $body,
 		) );
 		if ( is_wp_error( $resp ) ) {
-			$msg = $resp->get_error_message();
+			$msg  = $resp->get_error_message();
+			$what = CRDR_Send_Rules::transport_summary( $msg, $resp->get_error_code() ); // only the cURL number is kept
 			if ( 'definite' === CRDR_Send_Rules::classify_transport_error( $msg, $resp->get_error_code() ) ) {
-				return self::result( 'failed', $msg, 'gateway' );
+				return self::result( 'failed', $what, 'gateway' );
 			}
-			return self::result( 'unknown', self::unknown_text( $msg ) );
+			return self::result( 'unknown', self::unknown_text( $what ) );
 		}
 		$c = CRDR_Send_Rules::classify_response( wp_remote_retrieve_response_code( $resp ), wp_remote_retrieve_body( $resp ) );
 		if ( 'sent' === $c['state'] ) {
