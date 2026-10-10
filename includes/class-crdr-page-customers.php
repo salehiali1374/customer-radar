@@ -167,7 +167,7 @@ class CRDR_Page_Customers {
 			$kinds = array( 'sms' => 'پیامک', 'called' => 'تماس', 'skip' => 'امروز نه', 'optout' => 'عدم تمایل به پیام' );
 			echo '<ul class="crdr-log">';
 			foreach ( $log as $l ) {
-				echo '<li><strong>' . esc_html( CRDR_Jalali::date( $l['created_ts'] ) ) . '</strong> — ' . esc_html( isset( $kinds[ $l['kind'] ] ) ? $kinds[ $l['kind'] ] : $l['kind'] ) . ( 'holdout' === $l['grp'] ? ' (گروه شاهد؛ ارسال نشد)' : '' ) . ( 'failed' === $l['status'] ? ' — ناموفق: ' . esc_html( $l['error'] ) : '' ) . ( $l['playbook'] && 'manual' !== $l['playbook'] ? ' · کمپین: ' . esc_html( $l['playbook'] ) : '' ) . ( $l['message'] ? '<div class="crdr-muted">' . esc_html( $l['message'] ) . '</div>' : '' ) . '</li>'; // phpcs:ignore WordPress.Security.EscapeOutput
+				echo '<li><strong>' . esc_html( CRDR_Jalali::date( $l['created_ts'] ) ) . '</strong> — ' . esc_html( isset( $kinds[ $l['kind'] ] ) ? $kinds[ $l['kind'] ] : $l['kind'] ) . ( 'holdout' === $l['grp'] ? ' (گروه شاهد؛ ارسال نشد)' : '' ) . ( 'failed' === $l['status'] ? ' — ناموفق: ' . esc_html( $l['error'] ) : '' ) . ( 'unknown' === $l['status'] ? ' — نتیجه نامشخص (ممکن است ارسال شده باشد): ' . esc_html( $l['error'] ) : '' ) . ( $l['playbook'] && 'manual' !== $l['playbook'] ? ' · کمپین: ' . esc_html( $l['playbook'] ) : '' ) . ( $l['message'] ? '<div class="crdr-muted">' . esc_html( $l['message'] ) . '</div>' : '' ) . '</li>'; // phpcs:ignore WordPress.Security.EscapeOutput
 			}
 			echo '</ul>';
 		}

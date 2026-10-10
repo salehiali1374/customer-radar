@@ -6,6 +6,8 @@ define( 'CRDR_TESTING', true );
 require __DIR__ . '/../includes/class-crdr-jalali.php';
 require __DIR__ . '/../includes/class-crdr-rfm.php';
 require __DIR__ . '/../includes/class-crdr-stats.php';
+require __DIR__ . '/../includes/class-crdr-template.php';
+require __DIR__ . '/../includes/class-crdr-send-rules.php';
 
 $fail = 0;
 $pass = 0;
@@ -159,6 +161,156 @@ check( 'cohort m0', $co[10]['ret'][0], 100.0 );
 check( 'cohort m1', $co[10]['ret'][1], 50.0 );
 check( 'cohort m3 unobservable', $co[10]['ret'][3], null );
 check( 'cohort later', $co[11]['ret'][1], 100.0 );
+
+/* ================= Phase 1: campaign safety ================= */
+
+/* ---- template validation ---- */
+$none  = array();
+$offer = array( 'offer' => true );
+$reco  = array( 'reco' => true );
+check( 'tpl valid base tokens', CRDR_Template::validate( 'سلام {name}، از {store}. {optout}', $none ), array() );
+check( 'tpl valid offer tokens', CRDR_Template::validate( '{coupon} {discount} {expire}', $offer ), array() );
+check( 'tpl valid reco tokens', CRDR_Template::validate( '{product} {url} {bought}', $reco ), array() );
+check( 'tpl valid with no tokens at all', CRDR_Template::validate( 'سلام دوست عزیز', $none ), array() );
+check( 'tpl exactly 400 chars is valid', CRDR_Template::validate( str_repeat( 'ا', 400 ), $none ), array() );
+check( 'tpl 401 chars rejected', count( CRDR_Template::validate( str_repeat( 'ا', 401 ), $none ) ), 1 );
+check( 'tpl empty rejected', CRDR_Template::validate( "  \n ", $none ), array( 'متن پیام خالی است.' ) );
+
+$e = CRDR_Template::validate( 'سلام {nmae}', $none );
+check( 'tpl unknown token: one error', count( $e ), 1 );
+check( 'tpl unknown token: names it', false !== strpos( $e[0], '{nmae}' ), true );
+check( 'tpl unknown token: lists allowed ones', false !== strpos( $e[0], '{name}' ), true );
+$e = CRDR_Template::validate( '{Name}', $none );
+check( 'tpl wrong case gets a hint', false !== mb_strpos( $e[0], 'منظورتان «{name}»' ), true );
+$e = CRDR_Template::validate( '{ name }', $none );
+check( 'tpl spaced token gets a hint', false !== mb_strpos( $e[0], 'منظورتان «{name}»' ), true );
+check( 'tpl same unknown token reported once', count( CRDR_Template::validate( '{x} و {x}', $none ) ), 1 );
+
+$e = CRDR_Template::validate( 'کد شما {coupon}', $none );
+check( 'tpl {coupon} without an offer is an error', count( $e ), 1 );
+check( 'tpl {coupon} error explains the offer', false !== mb_strpos( $e[0], 'کد تخفیف' ), true );
+check( 'tpl {discount}/{expire} also need an offer', count( CRDR_Template::validate( '{discount} {expire}', $none ) ), 2 );
+$e = CRDR_Template::validate( '{product}', $none );
+check( 'tpl {product} without cross-sell is an error', false !== mb_strpos( $e[0], 'پیشنهاد محصول مکمل' ), true );
+check( 'tpl {coupon} is fine once the offer exists', CRDR_Template::validate( '{coupon}', $offer ), array() );
+
+check( 'tpl malformed: unclosed', CRDR_Template::parse( 'سلام {name' )['problems'], array( 'unclosed' ) );
+check( 'tpl malformed: stray close', CRDR_Template::parse( 'سلام name}' )['problems'], array( 'stray' ) );
+check( 'tpl malformed: nested', in_array( 'nested', CRDR_Template::parse( '{{name}}' )['problems'], true ), true );
+check( 'tpl malformed: unclosed is rejected', count( CRDR_Template::validate( 'سلام {name', $none ) ) >= 1, true );
+check( 'tpl malformed: stray close is rejected', count( CRDR_Template::validate( 'سلام name}', $none ) ) >= 1, true );
+check( 'tpl malformed: {{name}} is rejected', count( CRDR_Template::validate( '{{name}}', $none ) ) >= 2, true );
+check( 'tpl malformed: empty {} is rejected', false !== mb_strpos( CRDR_Template::validate( 'سلام {}', $none )[0], 'خالی' ), true );
+check( 'tpl parse keeps well-formed tokens', array_column( CRDR_Template::parse( '{a} x {b}' )['tokens'], 'name' ), array( 'a', 'b' ) );
+
+/* ---- safe rendering ---- */
+$vars = array( '{name}' => 'علی', '{store}' => 'فروشگاه', '{optout}' => 'لغو۱۱' );
+$r    = CRDR_Template::render( 'سلام {name} از {store}. {optout}', $vars );
+check( 'render fills everything', $r['text'], 'سلام علی از فروشگاه. لغو۱۱' );
+check( 'render ok when nothing is missing', $r['ok'], true );
+
+$r = CRDR_Template::render( 'کد شما {coupon}', $vars );
+check( 'render: missing coupon value is reported', $r['missing'], array( '{coupon}' ) );
+check( 'render: missing coupon -> not ok (must not be sent)', $r['ok'], false );
+$r = CRDR_Template::render( 'کد شما {coupon}', $vars + array( '{coupon}' => '' ) );
+check( 'render: an EMPTY coupon value counts as missing', $r['missing'], array( '{coupon}' ) );
+$r = CRDR_Template::render( 'سلام {name}{optout}', array_merge( $vars, array( '{optout}' => '' ) ) );
+check( 'render: opt-out text may legitimately be empty', $r['ok'], true );
+$r = CRDR_Template::render( '{foo} و {foo} و {bar}', $vars );
+check( 'render: unknown tokens listed once each', $r['missing'], array( '{foo}', '{bar}' ) );
+$r = CRDR_Template::render( 'سلام {name', $vars );
+check( 'render: malformed template flagged', array( $r['malformed'], $r['ok'] ), array( true, false ) );
+$r = CRDR_Template::render( 'سلام {name}', array_merge( $vars, array( '{name}' => '{coupon}' ) ) );
+check( 'render: braces inside customer data are not re-scanned', array( $r['text'], $r['ok'] ), array( 'سلام {coupon}', true ) );
+check( 'render: explain names the missing token', false !== mb_strpos( CRDR_Template::explain( CRDR_Template::render( '{coupon}', $vars ) ), '{coupon}' ), true );
+check( 'render: explain is empty when ok', CRDR_Template::explain( CRDR_Template::render( '{name}', $vars ) ), '' );
+
+/* ---- when may a campaign run? ---- */
+$g = function ( $mode, $trigger, $in, $req = false, $allow = false ) {
+	$r = CRDR_Send_Rules::gate( $mode, $trigger, $in, $req, $allow );
+	return array( $r['allowed'], $r['code'], $r['override'] );
+};
+check( 'gate: off blocks manual', $g( 'off', 'manual', true ), array( false, 'mode_off', false ) );
+check( 'gate: off blocks cron', $g( 'off', 'cron', true ), array( false, 'mode_off', false ) );
+check( 'gate: unknown mode is treated as off', $g( 'bogus', 'manual', true ), array( false, 'mode_off', false ) );
+check( 'gate: cron needs auto mode', $g( 'manual', 'cron', true ), array( false, 'not_auto', false ) );
+check( 'gate: cron in window ok', $g( 'auto', 'cron', true ), array( true, 'ok', false ) );
+check( 'gate: cron outside window blocked', $g( 'auto', 'cron', false ), array( false, 'outside_window', false ) );
+check( 'gate: cron can NEVER override the window', $g( 'auto', 'cron', false, true, true ), array( false, 'outside_window', false ) );
+check( 'gate: manual in window ok (manual mode)', $g( 'manual', 'manual', true ), array( true, 'ok', false ) );
+check( 'gate: manual in window ok (auto mode)', $g( 'auto', 'manual', true ), array( true, 'ok', false ) );
+check( 'gate: manual outside window blocked', $g( 'manual', 'manual', false ), array( false, 'outside_window', false ) );
+check( 'gate: manual outside window blocked in auto mode too', $g( 'auto', 'manual', false ), array( false, 'outside_window', false ) );
+check( 'gate: override requested without permission is refused', $g( 'manual', 'manual', false, true, false ), array( false, 'override_forbidden', false ) );
+check( 'gate: override with permission is allowed AND flagged', $g( 'manual', 'manual', false, true, true ), array( true, 'ok', true ) );
+check( 'gate: permission alone is not an override', $g( 'manual', 'manual', false, false, true ), array( false, 'outside_window', false ) );
+check( 'gate: override is not recorded when the window was open anyway', $g( 'manual', 'manual', true, true, true ), array( true, 'ok', false ) );
+check( 'gate: override can never switch an OFF campaign on', $g( 'off', 'manual', false, true, true ), array( false, 'mode_off', false ) );
+check( 'gate: an unknown trigger gets the strict (cron) rules', $g( 'manual', 'weird', true ), array( false, 'not_auto', false ) );
+foreach ( array( 'mode_off', 'not_auto', 'outside_window', 'override_forbidden' ) as $code ) {
+	check( "gate message exists: $code", '' !== CRDR_Send_Rules::gate_message( $code ), true );
+}
+check( 'gate message for ok is empty', CRDR_Send_Rules::gate_message( 'ok' ), '' );
+
+/* ---- sending hours, in the SITE timezone ---- */
+$teh = new DateTimeZone( 'Asia/Tehran' );
+$win = function ( $ts, $tz, $from = 9, $to = 21 ) {
+	return CRDR_Send_Rules::in_window( CRDR_Send_Rules::hour_in_tz( $ts, $tz ), $from, $to );
+};
+check( 'window: 20:59:59 Tehran is inside 9-21', $win( gmmktime( 17, 29, 59, 10, 8, 2026 ), $teh ), true );
+check( 'window: 21:00:00 Tehran is outside (end is exclusive)', $win( gmmktime( 17, 30, 0, 10, 8, 2026 ), $teh ), false );
+check( 'window: 08:59:59 Tehran is outside', $win( gmmktime( 5, 29, 59, 10, 8, 2026 ), $teh ), false );
+check( 'window: 09:00:00 Tehran is inside (start is inclusive)', $win( gmmktime( 5, 30, 0, 10, 8, 2026 ), $teh ), true );
+check( 'window: same instant, UTC site -> 17:30 is inside', $win( gmmktime( 17, 30, 0, 10, 8, 2026 ), new DateTimeZone( 'UTC' ) ), true );
+check( 'window: midnight Tehran is hour 0', CRDR_Send_Rules::hour_in_tz( gmmktime( 20, 30, 0, 10, 8, 2026 ), $teh ), 0 );
+check( 'window: midnight outside 9-21, inside 0-24', array( $win( gmmktime( 20, 30, 0, 10, 8, 2026 ), $teh ), $win( gmmktime( 20, 30, 0, 10, 8, 2026 ), $teh, 0, 24 ) ), array( false, true ) );
+check( 'window: 23:29 Tehran is inside 0-24', $win( gmmktime( 19, 59, 59, 10, 8, 2026 ), $teh, 0, 24 ), true );
+check( 'window: Tehran 2026 has no DST (12:00 UTC = 15:30)', CRDR_Send_Rules::hour_in_tz( gmmktime( 12, 0, 0, 7, 1, 2026 ), $teh ), 15 );
+check( 'window: Tehran 2021 still had DST (12:00 UTC = 16:30)', CRDR_Send_Rules::hour_in_tz( gmmktime( 12, 0, 0, 7, 1, 2021 ), $teh ), 16 );
+$ny = new DateTimeZone( 'America/New_York' );
+check( 'window: spring-forward, 06:59:59 UTC is 01:59 EST', CRDR_Send_Rules::hour_in_tz( gmmktime( 6, 59, 59, 3, 8, 2026 ), $ny ), 1 );
+check( 'window: spring-forward, 07:00:00 UTC is 03:00 EDT', CRDR_Send_Rules::hour_in_tz( gmmktime( 7, 0, 0, 3, 8, 2026 ), $ny ), 3 );
+check( 'window: fall-back, both 01:xx hours exist', array( CRDR_Send_Rules::hour_in_tz( gmmktime( 5, 59, 59, 11, 1, 2026 ), $ny ), CRDR_Send_Rules::hour_in_tz( gmmktime( 6, 0, 0, 11, 1, 2026 ), $ny ) ), array( 1, 1 ) );
+check( 'window: from == to is always closed (unchanged behaviour)', array( CRDR_Send_Rules::in_window( 9, 9, 9 ), CRDR_Send_Rules::in_window( 10, 9, 9 ) ), array( false, false ) );
+check( 'window: wrap-around windows are NOT supported (unchanged behaviour)', array( CRDR_Send_Rules::in_window( 22, 21, 6 ), CRDR_Send_Rules::in_window( 3, 21, 6 ) ), array( false, false ) );
+
+/* ---- reading what the gateway said ---- */
+$tr = array( 'CRDR_Send_Rules', 'classify_transport_error' );
+check( 'transport: DNS failure is definite', $tr( 'cURL error 6: Could not resolve host: api.kavenegar.com' ), 'definite' );
+check( 'transport: connection refused is definite', $tr( 'cURL error 7: Failed to connect to api.kavenegar.com port 443' ), 'definite' );
+check( 'transport: TLS handshake failure is definite', $tr( 'cURL error 35: OpenSSL SSL_connect' ), 'definite' );
+check( 'transport: bad certificate is definite', $tr( 'cURL error 60: SSL certificate problem' ), 'definite' );
+check( 'transport: connect timeout is definite', $tr( 'cURL error 28: Connection timed out after 10001 milliseconds' ), 'definite' );
+check( 'transport: DNS timeout is definite', $tr( 'cURL error 28: Resolving timed out after 5000 milliseconds' ), 'definite' );
+check( 'transport: TIMEOUT WAITING FOR THE ANSWER IS AMBIGUOUS', $tr( 'cURL error 28: Operation timed out after 20001 milliseconds with 0 bytes received' ), 'ambiguous' );
+check( 'transport: partial answer then timeout is ambiguous', $tr( 'cURL error 28: Operation timed out after 20000 milliseconds with 123 bytes received' ), 'ambiguous' );
+check( 'transport: empty reply is ambiguous', $tr( 'cURL error 52: Empty reply from server' ), 'ambiguous' );
+check( 'transport: receive failure is ambiguous', $tr( 'cURL error 56: Recv failure: Connection reset by peer' ), 'ambiguous' );
+check( 'transport: unrecognised text is ambiguous (the safe default)', $tr( 'something odd happened' ), 'ambiguous' );
+check( 'transport: blocked before any network I/O is definite', $tr( 'User has blocked requests through HTTP.', 'http_request_not_executed' ), 'definite' );
+
+$cl = function ( $http, $body ) {
+	$r = CRDR_Send_Rules::classify_response( $http, $body );
+	return array( $r['state'], $r['code'] );
+};
+check( 'response: 200 + status 200 is sent', $cl( 200, '{"return":{"status":200,"message":"تایید شد"},"entries":[{"messageid":1}]}' ), array( 'sent', 200 ) );
+check( 'response: 418 (no credit) in a 200 reply is a definite failure', $cl( 200, '{"return":{"status":418,"message":"اعتبار کافی نیست"}}' ), array( 'failed', 418 ) );
+check( 'response: HTTP 4xx with a documented code is definite', $cl( 412, '{"return":{"status":412,"message":"x"}}' ), array( 'failed', 412 ) );
+check( 'response: invalid API key is definite', $cl( 403, '{"return":{"status":403}}' ), array( 'failed', 403 ) );
+check( 'response: HTTP 500 is unknown', $cl( 500, '' )[0], 'unknown' );
+check( 'response: 502 even with a body that says 200 is unknown', $cl( 502, '{"return":{"status":200}}' )[0], 'unknown' );
+check( 'response: unreadable body is unknown', $cl( 200, 'not json' )[0], 'unknown' );
+check( 'response: empty body is unknown', $cl( 200, '' )[0], 'unknown' );
+check( 'response: an undocumented status is unknown', $cl( 200, '{"return":{"status":999}}' )[0], 'unknown' );
+check( 'response: a redirect is unknown', $cl( 302, '' )[0], 'unknown' );
+check( 'response: failure codes list matches the documented table', CRDR_Send_Rules::definite_failure_codes(), array( 400, 401, 402, 403, 411, 412, 413, 414, 417, 418, 424, 426, 428, 431, 432, 607 ) );
+
+/* ---- localid ---- */
+check( 'localid layout (ms + 6 digits)', CRDR_Send_Rules::localid( 1790000000000, 42 ), '1790000000000000042' );
+check( 'localid fits a signed 64-bit integer at the far end', CRDR_Send_Rules::localid( 9223372036854, 775807 ), '9223372036854775807' );
+check( 'localid generated value is 19 digits', 1 === preg_match( '/^\d{19}$/', CRDR_Send_Rules::localid() ), true );
+check( 'localid differs between milliseconds', CRDR_Send_Rules::localid( 1790000000001, 5 ) !== CRDR_Send_Rules::localid( 1790000000002, 5 ), true );
+check( 'minimum resend floor is one day', CRDR_Send_Rules::MIN_RESEND, 86400 );
 
 echo "\n$pass passed, $fail failed\n";
 exit( $fail ? 1 : 0 );

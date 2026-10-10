@@ -22,7 +22,7 @@ class CRDR_Page_Campaigns {
 		}
 
 		echo '<div class="crdr-card crdr-learn"><p><strong>چطور کار می‌کند؟</strong> هر کمپین یک «چه کسی، چه پیامی، چه پیشنهادی، چند نفر در روز» است که از قبل برایتان تنظیم شده. سه حالت دارد: <strong>غیرفعال</strong>، <strong>دستی</strong> (خودتان دکمه‌ی اجرا را می‌زنید) و <strong>خودکار</strong> (هر ساعت و فقط در ساعت‌های مجاز، دسته‌های کوچک ارسال می‌شود). همیشه بخشی از مخاطبان عمداً پیام نمی‌گیرند (گروه شاهد) تا معلوم شود پیام واقعاً فروش را بالا برده یا نه، یا مشتری خودش برمی‌گشت.</p>';
-		echo '<p class="crdr-muted">سرویس پیامک: <strong>' . esc_html( CRDR_SMS::provider_label() ) . '</strong> · ساعت مجاز ارسال خودکار: ' . esc_html( CRDR_UI::num( CRDR_Settings::get( 'send_from' ) ) ) . ' تا ' . esc_html( CRDR_UI::num( CRDR_Settings::get( 'send_to' ) ) ) . ' · ' . ( CRDR_Playbooks::in_send_window() ? 'الان در بازه‌ی مجاز است' : 'الان خارج از بازه‌ی مجاز است' ) . '</p></div>';
+		echo '<p class="crdr-muted">سرویس پیامک: <strong>' . esc_html( CRDR_SMS::provider_label() ) . '</strong> · ساعت مجاز ارسال (خودکار و دستی): ' . esc_html( CRDR_UI::num( CRDR_Settings::get( 'send_from' ) ) ) . ' تا ' . esc_html( CRDR_UI::num( CRDR_Settings::get( 'send_to' ) ) ) . ' · ' . ( CRDR_Playbooks::in_send_window() ? 'الان در بازه‌ی مجاز است' : 'الان خارج از بازه‌ی مجاز است' ) . '</p></div>';
 
 		echo '<p><form method="post" action="' . esc_url( admin_url( 'admin-post.php' ) ) . '" class="crdr-inline"><input type="hidden" name="action" value="crdr_pb_create">';
 		wp_nonce_field( CRDR_Actions::NONCE );
@@ -68,12 +68,22 @@ class CRDR_Page_Campaigns {
 	/* ------------------------------------------------------------------ edit */
 
 	private static function edit( $id ) {
-		$pb = CRDR_Playbooks::get( $id );
+		$pb    = CRDR_Playbooks::get( $id );
+		$draft = ( $pb && ! empty( $_GET['invalid'] ) ) ? CRDR_Playbooks::take_draft( $id ) : null; // phpcs:ignore WordPress.Security.NonceVerification
+		if ( $draft ) {
+			$pb = array_replace( $pb, $draft['cfg'] ); // show what was typed, so nothing has to be retyped.
+		}
 		CRDR_UI::open( 'ویرایش کمپین', 'customer-radar-campaigns' );
 		if ( ! $pb ) {
 			CRDR_UI::empty_state( 'کمپین پیدا نشد.', 'بازگشت', admin_url( 'admin.php?page=customer-radar-campaigns' ) );
 			CRDR_UI::close();
 			return;
+		}
+		if ( $draft ) {
+			CRDR_UI::notice( 'error', 'کمپین ذخیره نشد، چون متن پیام اشکال دارد. اشکال را اصلاح و دوباره ذخیره کنید:' );
+			foreach ( $draft['errors'] as $e ) {
+				CRDR_UI::notice( 'error', $e );
+			}
 		}
 		$a = (array) $pb['audience'];
 		$v = function ( $k ) use ( $a ) {
@@ -200,7 +210,7 @@ class CRDR_Page_Campaigns {
 		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT c.*, cu.name FROM {$k} c LEFT JOIN " . CRDR_DB::customers() . " cu ON cu.ckey = c.ckey WHERE c.playbook = %s AND c.kind = 'sms' ORDER BY c.id DESC LIMIT 20", $id ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL
 		if ( $rows ) {
 			echo '<div class="crdr-card"><h3>آخرین ارسال‌ها</h3><div class="crdr-scroll"><table class="widefat striped crdr-table"><thead><tr><th>زمان</th><th>مشتری</th><th>گروه</th><th>وضعیت</th><th>پیام</th></tr></thead><tbody>';
-			$st = array( 'ok' => 'ارسال شد', 'failed' => 'ناموفق', 'holdout' => 'شاهد' );
+			$st = array( 'ok' => 'ارسال شد', 'failed' => 'ناموفق', 'holdout' => 'شاهد', 'unknown' => 'نتیجه نامشخص (ممکن است رفته باشد)', 'pending' => 'در حال ارسال' );
 			foreach ( $rows as $c ) {
 				echo '<tr><td>' . esc_html( CRDR_Jalali::date( $c['created_ts'] ) . ' ' . CRDR_Jalali::digits( wp_date( 'H:i', $c['created_ts'] ) ) ) . '</td><td>' . esc_html( $c['name'] ?: '—' ) . '</td><td>' . ( 'holdout' === $c['grp'] ? 'شاهد' : 'پیام' ) . '</td><td>' . esc_html( isset( $st[ $c['status'] ] ) ? $st[ $c['status'] ] : $c['status'] ) . ( $c['error'] ? ' — ' . esc_html( $c['error'] ) : '' ) . '</td><td class="crdr-muted">' . esc_html( $c['message'] ) . '</td></tr>';
 			}

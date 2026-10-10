@@ -18,6 +18,9 @@ function t( $name, $cond, $extra = '' ) {
 global $wpdb;
 add_filter( 'pre_wp_mail', '__return_false' );
 @unlink( WP_CONTENT_DIR . '/pwsms-calls.log' );
+// Campaign runs now enforce the allowed sending hours on the server: give this test an always-open window,
+// and pin the provider to "auto" (= the PWSMS stub) so it does not depend on what another suite left in the settings.
+update_option( CRDR_Settings::OPTION, array_merge( CRDR_Settings::all(), array( 'send_from' => 0, 'send_to' => 24, 'sms_provider' => 'auto' ) ) );
 
 // Start from a clean slate so the test can be repeated: contacts, campaign settings, test orders and coupons.
 $wpdb->query( 'TRUNCATE TABLE ' . CRDR_DB::contacts() );
