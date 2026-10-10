@@ -50,11 +50,11 @@ class CRDR_Page_Campaigns {
 			echo '<ul class="crdr-facts">';
 			echo '<li>مخاطب فعلی: <strong>' . esc_html( CRDR_UI::num( $sum['n'] ) ) . ' نفر</strong>' . ( $sum['n'] ? ' (میانگین سبد ' . esc_html( CRDR_UI::money( $sum['aov'] ) ) . ')' : '' ) . '</li>';
 			echo '<li>پیشنهاد: ' . ( 'percent' === $pb['offer']['type'] ? esc_html( CRDR_UI::num( $pb['offer']['percent'] ) ) . '٪ تخفیف، ' . esc_html( CRDR_UI::num( $pb['offer']['days'] ) ) . ' روزه' : 'بدون تخفیف' ) . '</li>';
-			echo '<li>امروز ارسال شده: ' . esc_html( CRDR_UI::num( CRDR_Playbooks::sent_today( $id ) ) ) . ' از سقف ' . esc_html( CRDR_UI::num( $pb['daily_cap'] ) ) . ' · گروه شاهد: ' . esc_html( CRDR_UI::num( $pb['holdout_pct'] ) ) . '٪</li>';
+			echo '<li>امروز در سقف حساب شده (پذیرفته‌شده توسط سرویس پیامک، در حال ارسال یا با نتیجه‌ی نامشخص): ' . esc_html( CRDR_UI::num( CRDR_Playbooks::sent_today( $id ) ) ) . ' از سقف ' . esc_html( CRDR_UI::num( $pb['daily_cap'] ) ) . ' · گروه شاهد: ' . esc_html( CRDR_UI::num( $pb['holdout_pct'] ) ) . '٪</li>';
 			if ( $res && ( $res['treated']['n'] + $res['holdout']['n'] ) > 0 ) {
 				$tr = $res['treated']['n'] ? $res['treated']['conv'] / $res['treated']['n'] : 0;
 				$ho = $res['holdout']['n'] ? $res['holdout']['conv'] / $res['holdout']['n'] : 0;
-				echo '<li>نتیجه تا امروز: پیام‌گرفته‌ها ' . esc_html( CRDR_UI::pct( $tr, 1 ) ) . ' خرید مجدد، گروه شاهد ' . esc_html( CRDR_UI::pct( $ho, 1 ) ) . '</li>';
+				echo '<li>نتیجه تا امروز: کسانی که پیامکشان پذیرفته شد ' . esc_html( CRDR_UI::pct( $tr, 1 ) ) . ' خرید مجدد، گروه شاهد ' . esc_html( CRDR_UI::pct( $ho, 1 ) ) . '</li>';
 			}
 			echo CRDR_Health::card_item( $id, $pb ); // phpcs:ignore WordPress.Security.EscapeOutput -- escaped inside
 			$aside = CRDR_Playbooks::set_aside( $id );
@@ -180,7 +180,7 @@ class CRDR_Page_Campaigns {
 		$h = $r['holdout'];
 		if ( $t['n'] + $h['n'] === 0 ) {
 			CRDR_UI::empty_state( $r['sent_total'] > 0
-				? 'پیام‌های ارسال‌شده هنوز بازه‌ی سنجش را کامل نکرده‌اند (' . CRDR_UI::num( $r['immature'] ) . ' مورد در حال سنجش). چند روز بعد دوباره سر بزنید.'
+				? 'پیامک‌های پذیرفته‌شده هنوز بازه‌ی سنجش را کامل نکرده‌اند (' . CRDR_UI::num( $r['immature'] ) . ' مورد در حال سنجش). چند روز بعد دوباره سر بزنید.'
 				: 'هنوز پیامکی از این کمپین ارسال نشده است.', 'بازگشت به کمپین‌ها', admin_url( 'admin.php?page=customer-radar-campaigns' ) );
 			CRDR_UI::close();
 			return;
@@ -192,7 +192,7 @@ class CRDR_Page_Campaigns {
 			return $g['n'] ? $g['rev'] / $g['n'] : 0;
 		};
 		echo '<div class="crdr-card"><div class="crdr-scroll"><table class="widefat striped crdr-table"><thead><tr><th>گروه</th><th>تعداد</th><th>خرید مجدد</th><th>نرخ</th><th>فروش بعد از پیام</th><th>فروش به‌ازای هر نفر</th></tr></thead><tbody>';
-		foreach ( array( 'treated' => array( 'پیام گرفتند', $t ), 'holdout' => array( 'گروه شاهد (پیام نگرفتند)', $h ) ) as $row ) {
+		foreach ( array( 'treated' => array( 'پیامکشان پذیرفته شد', $t ), 'holdout' => array( 'گروه شاهد (پیامی برایشان نرفت)', $h ) ) as $row ) {
 			echo '<tr><td>' . esc_html( $row[0] ) . '</td><td>' . esc_html( CRDR_UI::num( $row[1]['n'] ) ) . '</td><td>' . esc_html( CRDR_UI::num( $row[1]['conv'] ) ) . '</td><td><strong>' . esc_html( CRDR_UI::pct( $rate( $row[1] ), 1 ) ) . '</strong></td><td>' . esc_html( CRDR_UI::money( $row[1]['rev'] ) ) . '</td><td>' . esc_html( CRDR_UI::money( $rpc( $row[1] ) ) ) . '</td></tr>';
 		}
 		echo '</tbody></table></div>';
@@ -207,15 +207,18 @@ class CRDR_Page_Campaigns {
 			if ( $x['p'] < 0.05 && $x['diff'] > 0 ) {
 				echo '<p class="crdr-good">نتیجه: اثر مثبت و از نظر آماری معنادار است؛ پیام واقعاً خرید را بالا برده.</p>';
 				$extra = ( $rpc( $t ) - $rpc( $h ) ) * $t['n'];
-				echo '<p>فروش اضافه‌ی تقریبی نسبت به حالت بدون پیام: <strong>' . esc_html( CRDR_UI::money( $extra ) ) . '</strong> (' . esc_html( CRDR_UI::num( $r['sent_total'] ) ) . ' پیامک ارسال‌شده در کل).</p>';
+				echo '<p>فروش اضافه‌ی تقریبی نسبت به حالت بدون پیام: <strong>' . esc_html( CRDR_UI::money( $extra ) ) . '</strong> (' . esc_html( CRDR_UI::num( $r['sent_total'] ) ) . ' پیامک پذیرفته‌شده توسط سرویس پیامک در کل).</p>';
 			} elseif ( $x['p'] < 0.05 && $x['diff'] < 0 ) {
-				echo '<p class="crdr-bad">نتیجه: گروه پیام‌گرفته کمتر از گروه شاهد خرید کرده است. متن یا زمان‌بندی را بازبینی کنید.</p>';
+				echo '<p class="crdr-bad">نتیجه: گروهی که پیامکشان پذیرفته شد کمتر از گروه شاهد خرید کرده است. متن یا زمان‌بندی را بازبینی کنید.</p>';
 			} else {
 				echo '<p>نتیجه: تفاوت معناداری دیده نشد؛ ممکن است اثر پیام کوچک باشد یا مشتریان خودشان برمی‌گشتند. قبل از افزایش بودجه، متن یا پیشنهاد را عوض و دوباره آزمایش کنید.</p>';
 			}
 		}
 		if ( $r['codes'] > 0 ) {
 			echo '<p>کدهای تخفیف: ' . esc_html( CRDR_UI::num( $r['codes'] ) ) . ' کد ساخته شد، ' . esc_html( CRDR_UI::num( $r['redeemed'] ) ) . ' کد استفاده شد (' . esc_html( CRDR_UI::pct( $r['redeemed'] / max( 1, $r['codes'] ), 1 ) ) . ').</p>';
+		}
+		if ( $r['unknown'] > 0 ) {
+			echo '<p class="crdr-muted">' . esc_html( CRDR_UI::num( $r['unknown'] ) ) . ' پیامک «نتیجه‌ی نامشخص» دارد (ممکن است رفته باشد و ممکن است نرفته باشد)؛ برای اینکه نتیجه را خراب نکند، در این مقایسه نیامده است.</p>';
 		}
 		if ( $r['immature'] > 0 ) {
 			echo '<p class="crdr-muted">' . esc_html( CRDR_UI::num( $r['immature'] ) ) . ' پیام اخیر هنوز در بازه‌ی سنجش‌اند و در این عددها نیامده‌اند.</p>';
@@ -226,11 +229,11 @@ class CRDR_Page_Campaigns {
 		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT c.*, cu.name FROM {$k} c LEFT JOIN " . CRDR_DB::customers() . " cu ON cu.ckey = c.ckey WHERE c.playbook = %s AND c.kind = 'sms' ORDER BY c.id DESC LIMIT 20", $id ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL
 		if ( $rows ) {
 			echo '<div class="crdr-card"><h3>آخرین ارسال‌ها</h3><div class="crdr-scroll"><table class="widefat striped crdr-table"><thead><tr><th>زمان</th><th>مشتری</th><th>گروه</th><th>وضعیت</th><th>پیام</th></tr></thead><tbody>';
-			$st = array( 'ok' => 'ارسال شد', 'failed' => 'ناموفق', 'nobuild' => 'پیام ساخته نشد یا رد شد', 'retry' => 'ناموفق (علت نامشخص؛ بعداً دوباره)', 'rejected' => 'شماره رد شد', 'holdout' => 'شاهد', 'unknown' => 'نتیجه نامشخص (ممکن است رفته باشد)', 'pending' => 'در حال ارسال' );
 			foreach ( $rows as $c ) {
-				echo '<tr><td>' . esc_html( CRDR_Jalali::date( $c['created_ts'] ) . ' ' . CRDR_Jalali::digits( wp_date( 'H:i', $c['created_ts'] ) ) ) . '</td><td>' . esc_html( $c['name'] ?: '—' ) . '</td><td>' . ( 'holdout' === $c['grp'] ? 'شاهد' : 'پیام' ) . '</td><td>' . esc_html( isset( $st[ $c['status'] ] ) ? $st[ $c['status'] ] : $c['status'] ) . ( $c['error'] ? ' — ' . esc_html( $c['error'] ) : '' ) . '</td><td class="crdr-muted">' . esc_html( $c['message'] ) . '</td></tr>';
+				echo '<tr><td>' . esc_html( CRDR_Jalali::date( $c['created_ts'] ) . ' ' . CRDR_Jalali::digits( wp_date( 'H:i', $c['created_ts'] ) ) ) . '</td><td>' . esc_html( $c['name'] ?: '—' ) . '</td><td>' . ( 'holdout' === $c['grp'] ? 'شاهد' : 'پیام' ) . '</td><td>' . '<span title="' . esc_attr( CRDR_Send_Rules::outcome( $c['status'] )['help'] ) . '">' . esc_html( CRDR_Send_Rules::outcome( $c['status'] )['label'] ) . '</span>' . ( $c['error'] ? ' — ' . esc_html( $c['error'] ) : '' ) . '</td><td class="crdr-muted">' . esc_html( $c['message'] ) . '</td></tr>';
 			}
-			echo '</tbody></table></div></div>';
+			echo '</tbody></table></div>';
+			echo '<p class="crdr-muted">«پذیرفته‌شده توسط سرویس پیامک» یعنی سرویس پیامک پیامک را پذیرفت و در صف ارسال گذاشت؛ این افزونه رسید تحویل ندارد، پس رسیدن آن به گوشی مشتری تأیید نشده است. «نتیجه نامشخص» یعنی پاسخ سرویس پیامک نرسید و ممکن است پیامک رفته باشد؛ دوباره فرستاده نمی‌شود. «ارسال نشد»، «شماره رد شد» و «پیام ساخته یا پذیرفته نشد» یعنی پیامکی نرفته است.</p></div>';
 		}
 		echo '<p><a href="' . esc_url( admin_url( 'admin.php?page=customer-radar-campaigns' ) ) . '">← بازگشت به کمپین‌ها</a></p>';
 		CRDR_UI::close();

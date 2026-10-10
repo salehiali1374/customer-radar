@@ -765,7 +765,7 @@ $html = crdr_t_page( array( 'CRDR_Page_Campaigns', 'render' ), array( 'page' => 
 t( 'campaign card says how many customers are set aside, why, and how to recover', false !== mb_strpos( $html, 'کنار گذاشته' ) && false !== mb_strpos( $html, 'کد تخفیف' ) && false !== mb_strpos( $html, 'ذخیره' ) );
 $cid1 = (int) $wpdb->get_var( 'SELECT id FROM ' . CRDR_DB::customers() . " WHERE ckey = 'p:09120000001'" );
 $html = crdr_t_page( array( 'CRDR_Page_Customers', 'render_detail' ), array( 'page' => 'customer-radar-customer', 'id' => $cid1 ) );
-t( 'the customer page shows the failure, in Persian', $clean_html( $html ) && false !== mb_strpos( $html, 'پیام ساخته نشد' ) );
+t( 'the customer page shows the failure, in Persian', $clean_html( $html ) && false !== mb_strpos( $html, 'پیام ساخته یا پذیرفته نشد' ) );
 $j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid1, 'type' => 'sms' ) );
 t( 'a set-aside customer can still be messaged by hand (nothing was "contacted")', true === $j['success'], wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
 
@@ -1039,6 +1039,98 @@ $dump = wp_json_encode( get_option( CRDR_Send::LOG_OPTION ) ) . wp_json_encode( 
 t( 'logs and health state: no phone number and no key', false === strpos( $dump, '0912' ) && false === strpos( $dump, 'TESTKEY' ) );
 crdr_t_reset( 0 );
 
+/* ====== B5. outcomes are shown for what they are: attempted / accepted / unknown / failed / rejected ====== */
+echo "== outcome wording and metrics\n";
+$mk_row = function ( $ckey, $status, array $x = array() ) {
+	CRDR_DB::add_contact( $ckey, 'sms', array_merge( array( 'playbook' => 'dormant', 'status' => $status, 'message' => 'متن آزمایشی', 'error' => '' ), $x ) );
+};
+$age = function ( $days ) use ( $wpdb ) {
+	$wpdb->query( $wpdb->prepare( 'UPDATE ' . CRDR_DB::contacts() . ' SET created_ts = created_ts - %d', $days * 86400 ) );
+};
+$order = function ( $ckey, $net, $days_after_contact ) use ( $wpdb ) {
+	$cts = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT created_ts FROM ' . CRDR_DB::contacts() . ' WHERE ckey = %s ORDER BY id LIMIT 1', $ckey ) );
+	$wpdb->insert( CRDR_DB::orders(), array( 'order_id' => wp_rand( 100000, 999999 ), 'ckey' => $ckey, 'ts' => $cts + $days_after_contact * 86400, 'net' => $net, 'items' => 1 ) );
+};
+crdr_t_cfg( array( 'mode' => 'manual', 'window_days' => 14, 'holdout_pct' => 20 ) );
+crdr_t_reset( 8 );
+$wpdb->query( 'TRUNCATE TABLE ' . CRDR_DB::orders() ); // the orders of an earlier run must not leak into the revenue figures
+$mk_row( 'p:09120000001', 'ok' );
+$mk_row( 'p:09120000002', 'unknown', array( 'error' => 'cURL error 28 timeout' ) );
+$mk_row( 'p:09120000003', 'failed', array( 'message' => '', 'error' => 'اعتبار حساب سرویس پیامک کافی نیست (کاوه‌نگار، کد 418).' ) );
+$mk_row( 'p:09120000004', 'rejected', array( 'message' => '', 'error' => 'شماره‌ی گیرنده از نظر سرویس پیامک معتبر نیست (کاوه‌نگار، کد 411).' ) );
+$mk_row( 'p:09120000005', 'holdout', array( 'grp' => 'holdout', 'message' => '' ) );
+$mk_row( 'p:09120000006', 'nobuild', array( 'message' => '', 'error' => 'x' ) );
+$mk_row( 'p:09120000007', 'pending' );
+$mk_row( 'p:09120000008', 'ok' );
+// right after the attempts (fresh rows): who rests, and what is counted against today's cap
+t( 'cooldown: accepted, unknown and pending outcomes keep the customer resting (nothing is sent twice)', 'cooldown' === CRDR_DB::blocked_reason( 'p:09120000001' ) && 'cooldown' === CRDR_DB::blocked_reason( 'p:09120000002' ) && 'cooldown' === CRDR_DB::blocked_reason( 'p:09120000007' ) );
+t( 'cooldown: failed, rejected and unbuildable customers do not rest (nothing went out)', '' === CRDR_DB::blocked_reason( 'p:09120000003' ) && '' === CRDR_DB::blocked_reason( 'p:09120000004' ) && '' === CRDR_DB::blocked_reason( 'p:09120000006' ) );
+t( 'daily cap: accepted (2) + unknown (1) + pending (1) use it up; failed / rejected / nobuild / control do not', 4 === CRDR_Playbooks::sent_today( 'dormant' ), (string) CRDR_Playbooks::sent_today( 'dormant' ) );
+$age( 30 ); // now old enough for the 14-day measurement window
+// 1, 2 and 5 bought again; 8 did not. The customer with the UNKNOWN outcome must not be counted as "messaged".
+$order( 'p:09120000001', 100000, 3 );
+$order( 'p:09120000002', 900000, 3 );
+$order( 'p:09120000005', 50000, 3 );
+$res = CRDR_Playbooks::results( 'dormant' );
+t( 'metrics: the comparison counts accepted messages (2) and the control group (1) only; the unknown outcome is in neither', 2 === $res['treated']['n'] && 1 === $res['treated']['conv'] && 1 === $res['holdout']['n'] && 1 === $res['holdout']['conv'], wp_json_encode( $res ) );
+t( 'metrics: the unknown customer\'s big order (900000) is NOT in the treated revenue', 100000.0 === (float) $res['treated']['rev'], wp_json_encode( $res['treated'] ) );
+t( 'metrics: the number of unknown outcomes left out is reported, not hidden', 1 === $res['unknown'] );
+t( 'metrics: "messages sent in total" is the accepted ones only (unknown / pending / failed are not counted)', 2 === $res['sent_total'] );
+
+$html = crdr_t_page( array( 'CRDR_Page_Campaigns', 'render' ), array( 'page' => 'customer-radar-campaigns', 'results' => 'dormant' ) );
+$clean_o = function ( $h ) {
+	return ! preg_match( '/(Warning|Notice|Deprecated|Fatal error)\s*:/', $h ) && false === strpos( $h, 'Stack trace' );
+};
+$o = function ( $s ) {
+	return CRDR_Send_Rules::outcome( $s );
+};
+t( 'results page renders', $clean_o( $html ) && false !== mb_strpos( $html, 'آخرین ارسال‌ها' ) );
+foreach ( array( 'ok', 'unknown', 'failed', 'rejected', 'holdout', 'nobuild', 'pending' ) as $stt ) {
+	t( "recent sends: the label for '{$stt}' is shown", false !== mb_strpos( $html, $o( $stt )['label'] ) );
+}
+t( 'recent sends: nothing says plain "sent" any more (the old label claimed more than is known)', false === mb_strpos( $html, 'ارسال شد' ) && false === mb_strpos( $html, 'پیام گرفتند' ) );
+t( 'recent sends: a legend tells the owner accepted is not delivered and what unknown means', false !== mb_strpos( $html, 'رسید تحویل ندارد' ) && false !== mb_strpos( $html, 'نتیجه نامشخص' ) );
+t( 'results page: reports the unknown outcome that was left out of the comparison', false !== mb_strpos( $html, 'نتیجه‌ی نامشخص' ) );
+$row_of = function ( $html, $label ) {
+	preg_match_all( '/<tr>.*?<\/tr>/s', $html, $m );
+	foreach ( $m[0] as $tr ) {
+		if ( false !== mb_strpos( $tr, $label ) ) {
+			return $tr;
+		}
+	}
+	return '';
+};
+$uk_row = $row_of( $html, 'نتیجه نامشخص' );
+t( 'recent sends: the unknown row is not described as accepted', '' !== $uk_row && false === mb_strpos( $uk_row, 'پذیرفته' ) );
+
+$cid2 = (int) $wpdb->get_var( 'SELECT id FROM ' . CRDR_DB::customers() . " WHERE ckey = 'p:09120000002'" );
+$page = crdr_t_page( array( 'CRDR_Page_Customers', 'render_detail' ), array( 'page' => 'customer-radar-customer', 'id' => $cid2 ) );
+t( 'customer history: an unknown SMS says "unknown / may have gone out", never "accepted"', false !== mb_strpos( $page, 'نتیجه نامشخص' ) && false === mb_strpos( $page, 'پذیرفته' ) );
+$cid1 = (int) $wpdb->get_var( 'SELECT id FROM ' . CRDR_DB::customers() . " WHERE ckey = 'p:09120000001'" );
+$page = crdr_t_page( array( 'CRDR_Page_Customers', 'render_detail' ), array( 'page' => 'customer-radar-customer', 'id' => $cid1 ) );
+t( 'customer history: an accepted SMS now says who accepted it (before, it had no status at all)', false !== mb_strpos( $page, 'پذیرفته‌شده توسط سرویس پیامک' ) );
+$cid4 = (int) $wpdb->get_var( 'SELECT id FROM ' . CRDR_DB::customers() . " WHERE ckey = 'p:09120000004'" );
+$page = crdr_t_page( array( 'CRDR_Page_Customers', 'render_detail' ), array( 'page' => 'customer-radar-customer', 'id' => $cid4 ) );
+t( 'customer history: a rejected number says so', false !== mb_strpos( $page, 'شماره رد شد' ) && false !== strpos( $page, '411' ) );
+
+$card = crdr_t_page( array( 'CRDR_Page_Campaigns', 'render' ), array( 'page' => 'customer-radar-campaigns' ) );
+t( 'campaign card: the cap line says what is counted (accepted or unknown), not "sent today"', false === mb_strpos( $card, 'امروز ارسال شده' ) && false !== mb_strpos( $card, 'نتیجه‌ی نامشخص' ) );
+t( 'campaign card: the result line does not call the treated group "message receivers"', false === mb_strpos( $card, 'پیام‌گرفته‌ها' ) );
+
+// what the person sees right after pressing a one-off SMS button
+crdr_t_cfg( array(), array(), array( 'mode' => 'ok', 'by_phone' => array( '09120000002' => 'timeout' ) ) );
+crdr_t_reset( 3 );
+$cid = (int) $wpdb->get_var( 'SELECT id FROM ' . CRDR_DB::customers() . " WHERE ckey = 'p:09120000001'" );
+$j   = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ) );
+t( 'one-off SMS accepted: the answer says the SMS service took it, and that arrival is not confirmed', true === $j['success'] && false !== mb_strpos( $j['data']['message'], 'سرویس پیامک' ) && false !== mb_strpos( $j['data']['message'], 'تأیید' ) && false === mb_strpos( $j['data']['message'], 'ارسال شد' ), wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
+$cid = (int) $wpdb->get_var( 'SELECT id FROM ' . CRDR_DB::customers() . " WHERE ckey = 'p:09120000002'" );
+$j   = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ) );
+t( 'one-off SMS with a timeout: not a success, says it may have gone out, and does not call the customer "sent"', false === $j['success'] && false !== mb_strpos( $j['data']['message'], 'ممکن است' ) && false === mb_strpos( $j['data']['message'], 'ارسال‌شده» حساب' ), wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
+$js = file_get_contents( CRDR_DIR . 'assets/admin.js' );
+t( 'the run log shown in the browser says "accepted", not "sent"', false !== mb_strpos( $js, 'پذیرفته' ) && false === mb_strpos( $js, "line('ارسال: '" ) );
+$wpdb->query( 'TRUNCATE TABLE ' . CRDR_DB::orders() );
+crdr_t_reset( 0 );
+
 /* ====================================================== C. duplicate sends */
 echo "== duplicate-send prevention\n";
 crdr_t_cfg();
@@ -1144,7 +1236,7 @@ echo "== timeouts, ambiguous results and definite failures\n";
 crdr_t_cfg( array(), array(), array( 'mode' => 'ok', 'by_phone' => array( '09120000001' => 'timeout' ) ) );
 crdr_t_reset( 6 );
 $r = CRDR_Playbooks::run( 'dormant', 6 );
-t( 'timeout: the run stops at the uncertain SMS and says so', 1 === $r['unknown'] && 0 === $r['sent'] && '' !== $r['error'] && false !== mb_strpos( $r['error'], 'ممکن است پیامک ارسال شده باشد' ), wp_json_encode( $r, JSON_UNESCAPED_UNICODE ) );
+t( 'timeout: the run stops at the uncertain SMS and says so', 1 === $r['unknown'] && 0 === $r['sent'] && '' !== $r['error'] && false !== mb_strpos( $r['error'], 'ممکن است پیامک رفته باشد' ), wp_json_encode( $r, JSON_UNESCAPED_UNICODE ) );
 $u = crdr_t_rows( "status = 'unknown'" );
 t( 'timeout: the row is "unknown" (not failed), keeps message + localid, claim cleared', 1 === count( $u ) && '' !== $u[0]['localid'] && 'سلام مشتری 1' === $u[0]['message'] && null === $u[0]['claim_key'] );
 t( 'timeout: the request really was made once', 1 === count( crdr_t_requests() ) );

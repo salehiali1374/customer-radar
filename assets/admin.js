@@ -119,7 +119,7 @@
 			var overridable = p.blocked === 'outside_window' && p.can_override && !badText && mode !== 'off';
 			var runnable = mode !== 'off' && p.audience > 0 && p.today < p.cap && !badText && (!p.blocked || overridable);
 			var html = '<h2>' + esc(title) + '</h2>';
-			html += '<p>مخاطب فعلی: <strong>' + digits(p.audience) + ' نفر</strong>' + (p.audience ? ' · میانگین سبد ' + esc(p.aov_fmt) : '') + '<br>سقف امروز: ' + digits(p.today) + ' از ' + digits(p.cap) + ' ارسال‌شده · ' + digits(p.holdout) + '٪ گروه شاهد (پیام نمی‌گیرند تا اثر واقعی سنجیده شود) · سرویس پیامک: ' + esc(p.provider) + '</p>';
+			html += '<p>مخاطب فعلی: <strong>' + digits(p.audience) + ' نفر</strong>' + (p.audience ? ' · میانگین سبد ' + esc(p.aov_fmt) : '') + '<br>سقف امروز: ' + digits(p.today) + ' از ' + digits(p.cap) + ' (پذیرفته‌شده، در حال ارسال یا نتیجه‌ی نامشخص) · ' + digits(p.holdout) + '٪ گروه شاهد (پیام نمی‌گیرند تا اثر واقعی سنجیده شود) · سرویس پیامک: ' + esc(p.provider) + '</p>';
 			if (badText) { html += '<p class="crdr-bad">متن پیام این کمپین اشکال دارد و ارسال نمی‌شود. از «ویرایش» اصلاحش کنید:<br>' + p.template_errors.map(esc).join('<br>') + '</p>'; }
 			else if (p.blocked && mode !== 'off') { html += '<p class="crdr-bad">' + esc(p.blocked_message) + '</p>'; }
 			if (overridable) {
@@ -156,7 +156,7 @@
 						if (r.blocked) { line('اجرا انجام نشد: ' + r.error); return; }
 						['sent', 'held_out', 'skipped', 'failed', 'unknown'].forEach(function (k) { tot[k] += (r[k] || 0); });
 						var did = r.sent + r.held_out + r.skipped + r.failed + (r.unknown || 0);
-						line('ارسال: ' + digits(tot.sent) + ' · گروه شاهد: ' + digits(tot.held_out) + ' · ردشده: ' + digits(tot.skipped) + ' · ناموفق: ' + digits(tot.failed) + (tot.unknown ? ' · نتیجه نامشخص: ' + digits(tot.unknown) : ''));
+						line('پذیرفته‌شده توسط سرویس پیامک: ' + digits(tot.sent) + ' · گروه شاهد: ' + digits(tot.held_out) + ' · ردشده: ' + digits(tot.skipped) + ' · ناموفق: ' + digits(tot.failed) + (tot.unknown ? ' · نتیجه نامشخص: ' + digits(tot.unknown) : ''));
 						if (r.error) { line('پیام خطا: ' + r.error); }
 						if (did > 0 && r.left > 0 && !r.error) { setTimeout(step, 400); } else { line('پایان. ' + (r.left <= 0 ? 'به سقف امروز رسید.' : '')); }
 					}).catch(function () { line('خطای ارتباط با سرور؛ وضعیت را در «نتایج» کمپین بررسی کنید و دوباره اجرا نکنید.'); });

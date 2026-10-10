@@ -22,3 +22,20 @@ from experience; a code that is not in that table is treated as **ambiguous**.
 * A permanent rejection is only recognised when the provider says so (411). Through the Persian-WooCommerce-SMS plugin it cannot be.
 * Stored errors are our own wording plus the provider code. The provider's text is never stored or shown, and API keys and
   phone numbers are removed from every error text (`CRDR_Send_Rules::redact`).
+
+## What a stored status means (and what it does not)
+The plugin has **no delivery receipts** (no status polling, no webhook, no message id is kept). So the most it can ever say is
+"the SMS service accepted the request"; it never says "delivered". The wording shown to the owner comes from one place,
+`CRDR_Send_Rules::outcome()`.
+
+| Status | Group | Persian label | Contact (cooldown) | Uses the daily cap | In the campaign result |
+|---|---|---|---|---|---|
+| `pending` | attempting | در حال ارسال | yes | yes | no |
+| `ok` | accepted | پذیرفته‌شده توسط سرویس پیامک | yes | yes | **treated group** |
+| `unknown` | unknown | نتیجه نامشخص | yes (no duplicate) | yes | **no**, reported as "N left out" |
+| `failed` / `retry` / `nobuild` | failed | ارسال نشد … | no | no | no |
+| `rejected` | rejected | شماره رد شد | no | no | no |
+| `holdout` | control | گروه شاهد | yes | no | **control group** |
+
+`unknown` is deliberately a contact for cooldown and the daily cap (so nobody gets a second SMS), but it is never counted as a
+success: it is not in the treated group, not in the revenue, not in "messages sent in total".

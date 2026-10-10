@@ -112,6 +112,48 @@ class CRDR_Send_Rules {
 		return isset( $m[ $code ] ) ? $m[ $code ] : '';
 	}
 
+	/**
+	 * What a stored contact status MEANS, in words the data can back up. This is the one place the admin pages take their
+	 * wording from, so no page can claim more than is known.
+	 *
+	 * The plugin has no delivery receipts (no status polling, no webhook), so no outcome is ever "delivered":
+	 * 'ok' only means the SMS service ACCEPTED the request (for Kavenegar: status 200, queued for sending).
+	 *
+	 * @return array group    attempting | accepted | unknown | failed | rejected | control | skipped | other
+	 *               label    short Persian name
+	 *               help     one Persian sentence for a store owner
+	 *               delivered always false (not established by anything we store)
+	 *               contact  counts as "customer was contacted" (cooldown, audience exclusion)
+	 *               cap      uses up the daily cap (the SMS may have gone out)
+	 *               measured is part of the campaign result comparison
+	 */
+	public static function outcome( $status ) {
+		$m = array(
+			'pending'  => array( 'attempting', 'در حال ارسال', 'پیامک در حال سپردن به سرویس پیامک است و نتیجه‌اش هنوز ثبت نشده.' ),
+			'ok'       => array( 'accepted', 'پذیرفته‌شده توسط سرویس پیامک', 'سرویس پیامک آن را پذیرفت و در صف ارسال گذاشت. این افزونه رسید تحویل ندارد، پس رسیدن آن به گوشی مشتری تأیید نشده است.' ),
+			'unknown'  => array( 'unknown', 'نتیجه نامشخص', 'پاسخ سرویس پیامک نرسید؛ ممکن است پیامک رفته باشد و ممکن است نرفته باشد. برای جلوگیری از پیام تکراری دوباره فرستاده نمی‌شود و مشتری تا پایان دوره‌ی استراحت پیامی نمی‌گیرد. وضعیت را در پنل سرویس پیامک ببینید.' ),
+			'failed'   => array( 'failed', 'ارسال نشد', 'پیامکی نرفت (مشکل شبکه یا حساب پیامک)؛ در اجرای بعدی دوباره امتحان می‌شود.' ),
+			'retry'    => array( 'failed', 'ارسال نشد (علت نامشخص)', 'پیامکی نرفت و سرویس پیامک علتش را نگفت؛ چند ساعت بعد، یا پس از ذخیره‌ی کمپین یا تنظیمات، دوباره امتحان می‌شود.' ),
+			'nobuild'  => array( 'failed', 'پیام ساخته یا پذیرفته نشد', 'پیامکی نرفت؛ متن برای این مشتری ساخته نشد یا سرویس پیامک متن را نپذیرفت.' ),
+			'rejected' => array( 'rejected', 'شماره رد شد', 'سرویس پیامک شماره‌ی این مشتری را نپذیرفت و پیامکی نرفت.' ),
+			'holdout'  => array( 'control', 'گروه شاهد', 'عمداً پیامی برای این مشتری فرستاده نشد تا اثر پیام سنجیده شود.' ),
+			'norec'    => array( 'skipped', 'رد شد (محصول مکمل پیدا نشد)', 'برای این مشتری محصول مکمل مناسبی پیدا نشد و پیامی نرفت.' ),
+		);
+		$s = (string) $status;
+		if ( ! isset( $m[ $s ] ) ) {
+			return array( 'group' => 'other', 'label' => 'وضعیت نامشخص', 'help' => 'وضعیت این ردیف شناخته‌شده نیست.', 'delivered' => false, 'contact' => true, 'cap' => false, 'measured' => false );
+		}
+		return array(
+			'group'     => $m[ $s ][0],
+			'label'     => $m[ $s ][1],
+			'help'      => $m[ $s ][2],
+			'delivered' => false,
+			'contact'   => ! in_array( $s, self::NOT_CONTACT, true ),
+			'cap'       => in_array( $s, array( 'pending', 'ok', 'unknown' ), true ),
+			'measured'  => in_array( $s, array( 'ok', 'holdout' ), true ),
+		);
+	}
+
 	/** Rejected-recipient rows newer than this still count. @param int $epoch time someone pressed "try again" for the campaign */
 	public static function reject_backoff_since( $now, $epoch ) {
 		return max( (int) $now - self::REJECT_BACKOFF, (int) $epoch );

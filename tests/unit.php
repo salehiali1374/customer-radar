@@ -467,5 +467,46 @@ check( 'rejected: counted from (now - 30 days) when nobody pressed "retry"', CRD
 check( 'rejected: pressing "retry" later lifts every earlier rejection', CRDR_Send_Rules::reject_backoff_since( 5000000, 4900000 ), 4900000 );
 check( 'rejected: an old "retry" does not shorten the wait', CRDR_Send_Rules::reject_backoff_since( 5000000, 1000 ), 5000000 - 30 * 86400 );
 
+/* ---- what each stored outcome means, in words the data can actually back up ---- */
+$all_statuses = array( 'pending', 'ok', 'unknown', 'failed', 'retry', 'nobuild', 'rejected', 'holdout', 'norec' );
+$oc = function ( $s ) {
+	return CRDR_Send_Rules::outcome( $s );
+};
+check( 'outcome: pending is "attempting", not an outcome yet', $oc( 'pending' )['group'], 'attempting' );
+check( 'outcome: ok is "accepted by the provider" and NOT "delivered"', array( $oc( 'ok' )['group'], $oc( 'ok' )['delivered'] ), array( 'accepted', false ) );
+check( 'outcome: unknown is its own group', $oc( 'unknown' )['group'], 'unknown' );
+check( 'outcome: failed / retry / nobuild are "failed" (nothing was sent)', array( $oc( 'failed' )['group'], $oc( 'retry' )['group'], $oc( 'nobuild' )['group'] ), array( 'failed', 'failed', 'failed' ) );
+check( 'outcome: rejected is its own group', $oc( 'rejected' )['group'], 'rejected' );
+check( 'outcome: holdout is the control group, not a failure', $oc( 'holdout' )['group'], 'control' );
+check( 'outcome: there are no delivery receipts, so no outcome is ever "delivered"', array_unique( array_map( function ( $s ) use ( $oc ) {
+	return $oc( $s )['delivered'];
+}, $all_statuses ) ), array( false ) );
+check( 'outcome: every group is distinct where the owner must tell them apart', count( array_unique( array_map( function ( $s ) use ( $oc ) {
+	return $oc( $s )['label'];
+}, array( 'ok', 'unknown', 'failed', 'rejected', 'pending', 'holdout' ) ) ) ), 6 );
+foreach ( $all_statuses as $s ) {
+	$o = $oc( $s );
+	check( "outcome $s: Persian label and help", 1 === preg_match( '/\p{Arabic}/u', $o['label'] ) && 1 === preg_match( '/\p{Arabic}/u', $o['help'] ), true );
+}
+check( 'outcome: "unknown" never reads like success', 1 === preg_match( '/نامشخص/u', $oc( 'unknown' )['label'] ) && 0 === preg_match( '/پذیرفته|ارسال شد|تحویل|موفق/u', $oc( 'unknown' )['label'] ), true );
+check( 'outcome: "unknown" help says it may have gone out, is not retried, and the customer rests', 1 === preg_match( '/ممکن است/u', $oc( 'unknown' )['help'] ) && 1 === preg_match( '/دوباره فرستاده نمی/u', $oc( 'unknown' )['help'] ), true );
+check( 'outcome: "ok" says provider, and the help says arrival at the phone is not confirmed', 1 === preg_match( '/سرویس پیامک/u', $oc( 'ok' )['label'] ) && 1 === preg_match( '/تأیید نشده/u', $oc( 'ok' )['help'] ), true );
+check( 'outcome: no label claims delivery to the customer', 0, count( array_filter( $all_statuses, function ( $s ) use ( $oc ) {
+	return 1 === preg_match( '/به دست مشتری|دریافت کرد|رسید به|تحویل مشتری|تحویل گیرنده/u', $oc( $s )['label'] );
+} ) ) );
+check( 'outcome: an unrecognised status is shown as unclear, never as success', array( $oc( 'zzz' )['group'], 0 === preg_match( '/پذیرفته|ارسال شد/u', $oc( 'zzz' )['label'] ) ), array( 'other', true ) );
+check( 'outcome: which statuses count as a contact for cooldown', array_values( array_filter( $all_statuses, function ( $s ) use ( $oc ) {
+	return $oc( $s )['contact'];
+} ) ), array( 'pending', 'ok', 'unknown', 'holdout', 'norec' ) );
+check( 'outcome: which statuses use up the daily cap (possibly sent)', array_values( array_filter( $all_statuses, function ( $s ) use ( $oc ) {
+	return $oc( $s )['cap'];
+} ) ), array( 'pending', 'ok', 'unknown' ) );
+check( 'outcome: only an accepted message is measured as "treated"', array_values( array_filter( $all_statuses, function ( $s ) use ( $oc ) {
+	return $oc( $s )['measured'];
+} ) ), array( 'ok', 'holdout' ) );
+check( 'outcome: the contact flag agrees with the not-contact list used by the SQL', array_values( array_filter( $all_statuses, function ( $s ) use ( $oc ) {
+	return ! $oc( $s )['contact'];
+} ) ), array( 'failed', 'retry', 'nobuild', 'rejected' ) );
+
 echo "\n$pass passed, $fail failed\n";
 exit( $fail ? 1 : 0 );

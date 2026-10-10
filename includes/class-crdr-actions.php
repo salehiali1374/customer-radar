@@ -248,7 +248,7 @@ class CRDR_Actions {
 		if ( 'sent' !== $out['state'] ) {
 			wp_send_json_error( array( 'message' => $out['error'] ) );
 		}
-		wp_send_json_success( array( 'message' => 'پیامک ارسال شد.' ) );
+		wp_send_json_success( array( 'message' => 'پیامک به سرویس پیامک سپرده و پذیرفته شد. (رسیدن آن به گوشی مشتری تأیید نمی‌شود.)' ) );
 	}
 
 	/* ------------------------------------------------------------- campaigns */

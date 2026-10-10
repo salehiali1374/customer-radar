@@ -658,7 +658,10 @@ class CRDR_Playbooks {
 	 * Measure a playbook: share of contacted customers who ordered again within the window,
 	 * compared with the holdout group that was not contacted.
 	 *
-	 * @return array treated/holdout stats, test, coupon redemptions, immature count
+	 * Only messages the SMS service ACCEPTED (status ok) are the treated group, and the holdout group is the customers
+	 * deliberately not messaged. A message with an unknown outcome is in neither (it is only counted in 'unknown').
+	 *
+	 * @return array treated/holdout stats, test, coupon redemptions, immature count, unknown count
 	 */
 	public static function results( $id ) {
 		global $wpdb;
@@ -698,6 +701,11 @@ class CRDR_Playbooks {
 			"SELECT COUNT(*) FROM {$k} WHERE playbook = %s AND kind = 'sms' AND grp = 'treated' AND status = 'ok'", $id // phpcs:ignore WordPress.DB.PreparedSQL
 		) );
 
+		// Messages whose outcome is unknown may or may not have gone out, so they belong to neither group; say how many.
+		$unknown = (int) $wpdb->get_var( $wpdb->prepare(
+			"SELECT COUNT(*) FROM {$k} WHERE playbook = %s AND kind = 'sms' AND grp = 'treated' AND status = 'unknown'", $id // phpcs:ignore WordPress.DB.PreparedSQL
+		) );
+
 		$test = CRDR_Stats::two_prop( $g['treated']['conv'], $g['treated']['n'], $g['holdout']['conv'], $g['holdout']['n'] );
 
 		// Coupon redemptions among the customers who received a code.
@@ -718,7 +726,8 @@ class CRDR_Playbooks {
 			'holdout'    => $g['holdout'],
 			'test'       => $test,
 			'immature'   => $immature,
-			'sent_total' => $sent_total,
+			'sent_total' => $sent_total, // accepted by the SMS service (not "delivered": nothing confirms that)
+			'unknown'    => $unknown,    // left out of the comparison
 			'codes'      => count( $codes ),
 			'redeemed'   => $redeemed,
 			'window'     => $w,
