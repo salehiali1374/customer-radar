@@ -2,19 +2,18 @@
 /**
  * Plugin Name:       رادار مشتری | Customer Radar
  * Description:       تحلیل RFM مشتریان ووکامرس، بخش‌بندی خودکار و «فهرست تماس امروز» برای بازگرداندن مشتریان قدیمی، با ارسال پیامک و کد تخفیف اختصاصی.
- * Version:           1.0.2
+ * Version:           1.0.3
  * Requires at least: 6.0
  * Requires PHP:      7.4
  * Author:            salehiali1374
- * License:           GPL-2.0-or-later
- * License URI:       https://www.gnu.org/licenses/gpl-2.0.html
+ * License:           Proprietary (all rights reserved) - see license.txt
  * Text Domain:       customer-radar
  * WC requires at least: 7.0
  */
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'CRDR_VERSION', '1.0.2' );
+define( 'CRDR_VERSION', '1.0.3' );
 define( 'CRDR_FILE', __FILE__ );
 define( 'CRDR_DIR', plugin_dir_path( __FILE__ ) );
 define( 'CRDR_URL', plugin_dir_url( __FILE__ ) );

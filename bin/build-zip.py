@@ -25,7 +25,7 @@ import zipfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SLUG = 'customer-radar'
 MAIN = 'customer-radar.php'
-ROOT_FILES = ['customer-radar.php', 'readme.txt', 'uninstall.php']
+ROOT_FILES = ['customer-radar.php', 'readme.txt', 'uninstall.php', 'license.txt']
 ASSET_GLOBS = ['assets/*.css', 'assets/*.js']
 INCLUDE_GLOB = 'includes/class-crdr-*.php'
 DEFAULT_EPOCH = 1767225600  # 2026-01-01T00:00:00Z

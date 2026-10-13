@@ -76,11 +76,11 @@ class BuildZip(unittest.TestCase):
 
     def test_release_candidate_version_is_consistent_everywhere(self):
         main = open(os.path.join(PROJECT, 'customer-radar.php'), encoding='utf-8').read()
-        self.assertEqual('1.0.2', self.mod.header_version(main))
-        self.assertIn("define( 'CRDR_VERSION', '1.0.2' );", main)
+        self.assertEqual('1.0.3', self.mod.header_version(main))
+        self.assertIn("define( 'CRDR_VERSION', '1.0.3' );", main)
         readme = open(os.path.join(PROJECT, 'readme.txt'), encoding='utf-8').read()
-        self.assertRegex(readme, r'(?m)^Stable tag: 1\.0\.2$')
-        self.assertRegex(readme, r'(?m)^= 1\.0\.2 =$')
+        self.assertRegex(readme, r'(?m)^Stable tag: 1\.0\.3$')
+        self.assertRegex(readme, r'(?m)^= 1\.0\.3 =$')
 
     def test_stray_root_files_such_as_the_untracked_pdf_are_never_inside(self):
         stray = [f for f in os.listdir(PROJECT) if f.lower().endswith('.pdf')]
@@ -101,7 +101,7 @@ class BuildZip(unittest.TestCase):
         names = self.names()
         for r in req:
             self.assertIn('customer-radar/' + r, names)
-        for n in ('customer-radar/customer-radar.php', 'customer-radar/readme.txt', 'customer-radar/uninstall.php', 'customer-radar/assets/admin.js', 'customer-radar/assets/admin.css', 'customer-radar/assets/charts.js'):
+        for n in ('customer-radar/customer-radar.php', 'customer-radar/readme.txt', 'customer-radar/uninstall.php', 'customer-radar/license.txt', 'customer-radar/assets/admin.js', 'customer-radar/assets/admin.css', 'customer-radar/assets/charts.js'):
             self.assertIn(n, names)
 
     def test_nothing_that_must_stay_home_is_inside(self):
@@ -173,7 +173,7 @@ class BuildZip(unittest.TestCase):
         def changelog(root):
             p = os.path.join(root, 'readme.txt')
             with open(p, encoding='utf-8') as f:
-                t = f.read().replace('= 1.0.2 =', '= 1.0.0 =', 1)
+                t = f.read().replace('= 1.0.3 =', '= 1.0.0 =', 1)
             with open(p, 'w', encoding='utf-8') as f:
                 f.write(t)
         mod, _ = tree(changelog)
