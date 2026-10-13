@@ -57,10 +57,18 @@ class CRDR_Send {
 	 *
 	 * @param string   $grp           treated | holdout
 	 * @param int|null $cooldown_days campaign override of the "days between messages" setting
-	 * @return array [ 'id' => row id ] when claimed, otherwise [ 'skip' => busy | optout | cooldown | error ]
+	 * @return array [ 'id' => row id ] when claimed, otherwise [ 'skip' => busy | optout | cooldown | error | syncing | schema ]
 	 */
 	public static function claim( $ckey, $playbook, $run_id, $grp = 'treated', $cooldown_days = null ) {
 		global $wpdb;
+		// The customer data is being rebuilt (or a rebuild stopped half way): nobody is claimed, nothing can be sent.
+		if ( CRDR_Sync::send_guard()['blocked'] ) {
+			return array( 'skip' => 'syncing' );
+		}
+		// The unique index on claim_key is what makes "one send per customer" true; without the schema nobody is claimed.
+		if ( ! CRDR_DB::schema_ok() ) {
+			return array( 'skip' => 'schema' );
+		}
 		$prev = $wpdb->suppress_errors( true ); // a lost race is an expected "Duplicate entry", not something to print.
 		$ok   = $wpdb->insert(
 			CRDR_DB::contacts(),
@@ -86,7 +94,7 @@ class CRDR_Send {
 		$why = CRDR_DB::blocked_reason( $ckey, $id, $cooldown_days );
 		if ( '' !== $why ) {
 			self::release( $id );
-			return array( 'skip' => $why );
+			return array( 'skip' => 'dberror' === $why ? 'error' : $why ); // a database that cannot answer is an error, never "free to send"
 		}
 		// A new attempt supersedes an earlier "set aside" record (could not build / provider refused / recipient
 		// rejected): if it fails again a fresh row says so, if it works the customer is no longer listed as set aside.
@@ -193,9 +201,47 @@ class CRDR_Send {
 	/**
 	 * Send the SMS for a claimed row and record what happened.
 	 *
-	 * @return array state (sent|failed|unknown), error
+	 * @return array state (sent|failed|unknown), error, scope (failed only; 'optout' = the customer (by claimed key or by the number being sent to) opted out after being claimed, nothing was sent and the claim was given back; 'db' = the opt-out could not be read; 'claim' = the claim is gone)
 	 */
 	public static function send_claimed( $row_id, $phone, $message, $coupon = '' ) {
+		global $wpdb;
+		// Checked again right before the gateway: a rebuild may have started after the customer was claimed. CRDR_SMS::deliver()
+		// is only ever called from here (a test enforces it), so this is the last server-side gate. Nothing was sent, so the
+		// claim ends as "failed" (not a contact) and the customer is tried again after the sync.
+		$sync = CRDR_Sync::send_guard();
+		if ( $sync['blocked'] ) {
+			self::finalize( $row_id, 'failed', $sync['message'] );
+			return array( 'state' => 'failed', 'error' => $sync['message'], 'scope' => 'sync', 'code' => $sync['code'] );
+		}
+		// The LAST opt-out check, on the database as it is now. claim() checked it too, but the message and the discount code were built
+		// after that (other plugins hook into coupon creation), and a person may have clicked "do not message" in the meantime.
+		// It asks about BOTH identities: the customer key the claim was made for, AND the phone number the SMS is really going to
+		// (p:<normalised number>). Normally they are the same thing; if a caller ever pairs a key with a different number, the number decides too.
+		// Nothing has been sent yet, so the claim is simply given back. An answer that cannot be read is "do not send".
+		$ckey = $wpdb->get_var( $wpdb->prepare( 'SELECT ckey FROM ' . CRDR_DB::contacts() . " WHERE id = %d AND status = 'pending'", (int) $row_id ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+		if ( ! is_string( $ckey ) || '' === $ckey ) { // the claim is gone (recovered or released by another process) or cannot be read: it is not ours to send
+			$why = $wpdb->last_error ? 'بررسی عدم تمایل مشتری به پیام ممکن نشد (خطای پایگاه‌داده)؛ پیامکی فرستاده نشد.' : 'ارسال این پیامک دیگر معتبر نیست (ثبت ارسال پیدا نشد)؛ پیامکی فرستاده نشد.';
+			return array( 'state' => 'failed', 'error' => $why, 'scope' => $wpdb->last_error ? 'db' : 'claim' );
+		}
+		$keys  = array( $ckey );
+		$digit = CRDR_Identity::phone( $phone );
+		if ( '' !== $digit && 'p:' . $digit !== $ckey ) {
+			$keys[] = 'p:' . $digit;
+		}
+		foreach ( $keys as $key ) {
+			$out = CRDR_DB::is_opted_out( $key );
+			if ( null === $out ) { // the database could not answer: "unknown" is not "not opted out"
+				self::finalize( $row_id, 'failed', 'بررسی عدم تمایل مشتری به پیام ممکن نشد (خطای پایگاه‌داده)؛ پیامکی فرستاده نشد.' );
+				return array( 'state' => 'failed', 'error' => 'بررسی عدم تمایل مشتری به پیام ممکن نشد (خطای پایگاه‌داده)؛ پیامکی فرستاده نشد.', 'scope' => 'db' );
+			}
+			if ( $out ) {
+				self::release( $row_id );
+				if ( '' !== (string) $coupon ) {
+					CRDR_Actions::discard_coupon( $coupon, $ckey ); // created for this message, never delivered, never usable
+				}
+				return array( 'state' => 'failed', 'error' => 'این مشتری درخواست نکردن پیام داده است؛ پیامکی فرستاده نشد.', 'scope' => 'optout' );
+			}
+		}
 		if ( '' === trim( (string) $message ) ) {
 			self::finalize( $row_id, CRDR_Send_Rules::failure_status( 'message' ), 'متن پیامک خالی است.' );
 			return array( 'state' => 'failed', 'error' => 'متن پیامک خالی است.', 'scope' => 'message' );

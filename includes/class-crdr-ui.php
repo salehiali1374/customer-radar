@@ -27,7 +27,62 @@ class CRDR_UI {
 			'customer-radar-customers'  => 'مشتریان',
 			'customer-radar-products'   => 'محصولات و مکمل',
 			'customer-radar-settings'   => 'تنظیمات',
+			'customer-radar-guide'      => 'آموزش',
 		);
+	}
+
+	/**
+	 * Persian name of a WooCommerce order status, for display only (the stored value, the slug, never changes). WooCommerce shows English
+	 * names unless its own translation is installed; a status this plugin does not know (a custom one) keeps the name WooCommerce gives it.
+	 */
+	public static function status_label( $slug, $fallback = '' ) {
+		$map = array(
+			'pending'        => 'در انتظار پرداخت',
+			'processing'     => 'در حال انجام',
+			'on-hold'        => 'در انتظار بررسی',
+			'completed'      => 'تکمیل‌شده',
+			'cancelled'      => 'لغوشده',
+			'refunded'       => 'مسترد‌شده',
+			'failed'         => 'ناموفق',
+			'checkout-draft' => 'پیش‌نویس سفارش',
+		);
+		return isset( $map[ $slug ] ) ? $map[ $slug ] : ( '' !== (string) $fallback ? $fallback : (string) $slug );
+	}
+
+	/**
+	 * What each SMS variable means, as the code fills it (CRDR_Actions::render_checked, CRDR_Playbooks::compose, CRDR_Recommend).
+	 * name => array( meaning, example )
+	 */
+	public static function variable_catalog() {
+		return array(
+			'name'     => array( 'نام مشتری. اگر نامی ثبت نشده باشد، «مشتری» می‌آید.', 'علی' ),
+			'store'    => array( 'نام فروشگاه (عنوان سایت در تنظیمات وردپرس).', 'فروشگاه نمونه' ),
+			'optout'   => array( 'عبارت لغو عضویت که در «تنظیمات» نوشته‌اید. در هر پیامک تبلیغاتی الزامی است.', 'لغو۱۱' ),
+			'coupon'   => array( 'کد تخفیف یک‌بارمصرفِ همان مشتری؛ هنگام ارسال ساخته می‌شود (در پیش‌نمایش «XXXXXXXX» می‌بینید).', 'RD7K2M9Q' ),
+			'discount' => array( 'درصد تخفیف، فقط عدد (علامت ٪ را خودتان بعدش بنویسید).', '۱۰' ),
+			'expire'   => array( 'تاریخ پایان اعتبار کد، شمسی.', '۱۴۰۵/۰۸/۰۳' ),
+			'product'  => array( 'نام محصول مکملِ پیشنهادی: محصولی که خریداران محصولات او معمولاً می‌خرند و خودش هنوز نخریده است.', 'ضدآفتاب SPF50' ),
+			'bought'   => array( 'نام محصولی که مشتری قبلاً خریده و پیشنهاد بر پایه‌ی آن است.', 'سرم ویتامین سی' ),
+			'url'      => array( 'نشانی صفحه‌ی محصول پیشنهادی. بعضی سرویس‌های پیامک لینک را برای حساب‌ها محدود می‌کنند (کاوه‌نگار کد ۴۲۰)؛ در آن صورت لینک را بردارید.', 'https://…' ),
+		);
+	}
+
+	/**
+	 * A compact "which variables can I write here" box under an SMS text field.
+	 *
+	 * @param string[] $names variable names (without braces) to show; the rest are not available in that text
+	 * @param string   $note  an extra sentence ('' = none)
+	 */
+	public static function variable_help( array $names, $note = '' ) {
+		$cat = self::variable_catalog();
+		echo '<details class="crdr-vars" open><summary>متغیرها: چیزهایی که می‌توانید در متن بنویسید</summary><dl>';
+		foreach ( $names as $n ) {
+			if ( ! isset( $cat[ $n ] ) ) {
+				continue;
+			}
+			echo '<dt><code>{' . esc_html( $n ) . '}</code></dt><dd>' . esc_html( $cat[ $n ][0] ) . ' <span class="crdr-muted">مثال: ' . esc_html( $cat[ $n ][1] ) . '</span></dd>';
+		}
+		echo '</dl><p class="crdr-muted">' . esc_html( 'هر متغیر را دقیقاً با آکولاد و به همین شکل بنویسید. اگر برای مشتری‌ای پر نشود، پیامی برایش ارسال نمی‌شود (به‌جای فرستادن متن ناقص). هر ۷۰ نویسه یک بخش پیامک حساب می‌شود و بیش از آن، هر ۶۷ نویسه یک بخش. ' . $note ) . '</p></details>';
 	}
 
 	/** Open the page frame. Pair with close(). */
@@ -100,6 +155,14 @@ class CRDR_UI {
 		echo '</div>';
 	}
 
+	/** A warning on pages that show numbers taken from the customer table, while that table is being rebuilt. */
+	public static function sync_banner() {
+		$sync = CRDR_Sync::guard();
+		if ( $sync['blocked'] ) {
+			self::notice( 'warning', $sync['message'] . ' عددهای این صفحه تا پایان به‌روزرسانی کامل نیستند.' );
+		}
+	}
+
 	public static function notice( $type, $message ) {
 		echo '<div class="notice notice-' . esc_attr( $type ) . ' is-dismissible"><p>' . esc_html( $message ) . '</p></div>';
 	}
@@ -156,7 +219,7 @@ class CRDR_UI {
 	public static function filter_actions( array $f, array $extra = array() ) {
 		$args = array_merge( CRDR_Audience::to_args( $f ), $extra, array( 'action' => 'crdr_export' ) );
 		echo '<div class="crdr-actions-bar">';
-		echo '<a class="button" href="' . esc_url( wp_nonce_url( add_query_arg( $args, admin_url( 'admin-post.php' ) ), CRDR_Actions::NONCE ) ) . '">دریافت اکسل (CSV)</a> ';
+		echo '<a class="button" href="' . esc_url( wp_nonce_url( add_query_arg( $args, admin_url( 'admin-post.php' ) ), CRDR_Actions::NONCE ) ) . '" title="' . esc_attr( 'ستون «' . CRDR_Actions::EXPORT_OPTOUT_HEADER . '» مشتریانی را که پیام نخواسته‌اند نشان می‌دهد؛ پیش از استفاده در پنل پیامک آن‌ها را حذف کنید.' ) . '">دریافت اکسل (CSV)</a> <span class="crdr-muted">' . esc_html( 'حداکثر ۵۰٬۰۰۰ مشتری در فایل می‌آید. مشتریانی که پیام نخواسته‌اند هم در فایل می‌آیند (فیلتری برای حذفشان نیست) و ستون آخر آن‌ها را مشخص می‌کند؛ پیش از استفاده در پنل پیامک حذفشان کنید.' ) . '</span> ';
 		echo '<form method="post" action="' . esc_url( admin_url( 'admin-post.php' ) ) . '" class="crdr-inline"><input type="hidden" name="action" value="crdr_pb_create">';
 		wp_nonce_field( CRDR_Actions::NONCE );
 		foreach ( CRDR_Audience::to_args( $f ) as $k => $val ) {

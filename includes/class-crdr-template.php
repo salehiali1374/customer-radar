@@ -83,7 +83,7 @@ class CRDR_Template {
 	/**
 	 * Check a template for a context. Returns understandable Persian messages; an empty list means valid.
 	 *
-	 * @param array $ctx offer (bool): a discount code is generated; reco (bool): a recommended product exists
+	 * @param array $ctx offer (bool): a discount code is generated; reco (bool): a recommended product exists; require_optout (bool): the text is promotional and must contain {optout}
 	 * @return string[]
 	 */
 	public static function validate( $tpl, array $ctx = array() ) {
@@ -133,6 +133,11 @@ class CRDR_Template {
 				$err[] = 'متغیر «' . $t['raw'] . '» شناخته‌شده نیست.' . $hint . ' متغیرهای مجاز در این متن: ' . self::list_names( $allowed );
 			}
 		}
+		// Last, so that the first message a person sees is about the text itself (a wrong token, a stray brace).
+		// A promotional message must carry the opt-out phrase: without {optout} nobody is told how to stop the messages.
+		if ( ! empty( $ctx['require_optout'] ) && ! in_array( '{optout}', array_column( $parsed['tokens'], 'raw' ), true ) ) {
+			$err[] = 'متن پیامک تبلیغاتی باید شامل «{optout}» باشد (عبارت لغو عضویت، مثلاً «لغو۱۱»)؛ بدون آن مشتری نمی‌داند چگونه پیام‌ها را متوقف کند.';
+		}
 		return $err;
 	}
 
@@ -172,6 +177,9 @@ class CRDR_Template {
 	public static function explain( array $r ) {
 		if ( ! empty( $r['malformed'] ) ) {
 			return 'ساختار متن پیام درست نیست (آکولادها).';
+		}
+		if ( ! empty( $r['missing'] ) && array( '{optout}' ) === array_values( $r['missing'] ) ) {
+			return 'عبارت لغو عضویت در «تنظیمات» خالی است؛ پیامک تبلیغاتی بدون آن فرستاده نمی‌شود.';
 		}
 		if ( ! empty( $r['missing'] ) ) {
 			return 'مقدار این متغیرها ساخته نشد: ' . implode( ' ', $r['missing'] );

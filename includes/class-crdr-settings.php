@@ -16,8 +16,8 @@ class CRDR_Settings {
 			'sms_provider'   => 'auto', // auto | pwsms | kavenegar | none
 			'kavenegar_key'  => '',
 			'kavenegar_from' => '',
-			'sms_template'   => 'سلام {name} عزیز، مدتی است از شما در {store} خبری نداریم. دلتنگتان شدیم!',
-			'sms_template_coupon' => 'سلام {name} عزیز، برای شما در {store} کد تخفیف {discount}٪ با کد {coupon} فعال کردیم (تا {expire}).',
+			'sms_template'   => 'سلام {name} عزیز، مدتی است از شما در {store} خبری نداریم. دلتنگتان شدیم! {optout}',
+			'sms_template_coupon' => 'سلام {name} عزیز، برای شما در {store} کد تخفیف {discount}٪ با کد {coupon} فعال کردیم (تا {expire}). {optout}',
 			'coupon_percent' => 10,
 			'coupon_days'    => 7,
 			'coupon_min'     => 0,
@@ -26,6 +26,7 @@ class CRDR_Settings {
 			'send_to'        => 21,
 			'margin_pct'     => 30,
 			'bundle_discount' => 8,
+			'erase_on_uninstall' => 0, // 1 = deleting the plugin ALSO erases the "do not message" list (CRDR_Uninstall)
 		);
 	}
 
@@ -54,11 +55,19 @@ class CRDR_Settings {
 			'sms_template'        => array( 'متن پیامک ساده', false ),
 			'sms_template_coupon' => array( 'متن پیامک با کد تخفیف', true ),
 		) as $key => $def ) {
-			foreach ( CRDR_Template::validate( isset( $s[ $key ] ) ? $s[ $key ] : '', array( 'offer' => $def[1] ) ) as $e ) {
+			foreach ( CRDR_Template::validate( isset( $s[ $key ] ) ? $s[ $key ] : '', array( 'offer' => $def[1], 'require_optout' => true ) ) as $e ) {
 				$errors[] = $def[0] . ': ' . $e;
 			}
 		}
-		return $errors;
+		return array_merge( $errors, self::optout_errors( $s ) );
+	}
+
+	/** The opt-out phrase is what {optout} becomes in every message: it must not be empty. */
+	public static function optout_errors( array $s ) {
+		if ( '' === trim( isset( $s['optout_text'] ) ? (string) $s['optout_text'] : '' ) ) {
+			return array( 'عبارت لغو عضویت: نباید خالی باشد، چون در پایان هر پیامک تبلیغاتی می‌آید (مثلاً «لغو۱۱»).' );
+		}
+		return array();
 	}
 
 	/**
@@ -126,6 +135,7 @@ class CRDR_Settings {
 		$out['send_to']         = max( 1, min( 24, (int) ( $in['send_to'] ?? $d['send_to'] ) ) );
 		$out['margin_pct']      = max( 1, min( 95, (int) ( $in['margin_pct'] ?? $d['margin_pct'] ) ) );
 		$out['bundle_discount'] = max( 0, min( 50, (int) ( $in['bundle_discount'] ?? $d['bundle_discount'] ) ) );
+		$out['erase_on_uninstall'] = ! empty( $in['erase_on_uninstall'] ) ? 1 : 0; // a checkbox: only an explicit tick turns it on
 
 		return $out;
 	}

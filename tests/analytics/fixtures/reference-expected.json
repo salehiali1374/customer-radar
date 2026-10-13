@@ -1,0 +1,300 @@
+{
+ "counted_order_ids": [
+  1,
+  2,
+  3,
+  4,
+  5,
+  11,
+  12,
+  13,
+  14,
+  15,
+  16,
+  18
+ ],
+ "orders_total": 12,
+ "revenue_plugin_total": 4450000.0,
+ "net_sales_excl_tax_shipping": 4450000.0,
+ "shipping_in_counted": 0,
+ "tax_in_counted": 0,
+ "aov_plugin_mean": 370833.3333333333,
+ "aov_net_sales_mean": 370833.3333333333,
+ "customers_total": 8,
+ "customers": {
+  "p:09120000005": {
+   "orders": 1,
+   "spent": 450000.0
+  },
+  "ERASED-14": {
+   "orders": 1,
+   "spent": 120000.0
+  },
+  "G2": {
+   "orders": 3,
+   "spent": 750000.0
+  },
+  "ERASED-15": {
+   "orders": 1,
+   "spent": 130000.0
+  },
+  "p:09120000001": {
+   "orders": 3,
+   "spent": 1800000.0
+  },
+  "p:09120000002": {
+   "orders": 1,
+   "spent": 600000.0
+  },
+  "o:18": {
+   "orders": 1,
+   "spent": 100000.0
+  },
+  "p:09350000002": {
+   "orders": 1,
+   "spent": 500000.0
+  }
+ },
+ "repeat_customers": 2,
+ "repeat_customers_pct": 0.25,
+ "repeat_revenue_pct": 0.5730337078651685,
+ "gaps_days": [
+  32.0,
+  45.166666666666664,
+  64.37498842592592,
+  151.0
+ ],
+ "second_purchase_days": [
+  45.166666666666664,
+  151.0
+ ],
+ "second_median_days": 98.08333333333333,
+ "gap_median_days": 54.77082754629629,
+ "monthly": {
+  "1404-12": {
+   "orders": 2,
+   "revenue": 570000.0,
+   "new_rev": 570000.0,
+   "ret_rev": 0
+  },
+  "1405-01": {
+   "orders": 1,
+   "revenue": 300000.0,
+   "new_rev": 300000.0,
+   "ret_rev": 0
+  },
+  "1405-02": {
+   "orders": 1,
+   "revenue": 130000.0,
+   "new_rev": 130000.0,
+   "ret_rev": 0
+  },
+  "1405-03": {
+   "orders": 1,
+   "revenue": 1000000.0,
+   "new_rev": 1000000.0,
+   "ret_rev": 0
+  },
+  "1405-04": {
+   "orders": 1,
+   "revenue": 500000.0,
+   "new_rev": 0,
+   "ret_rev": 500000.0
+  },
+  "1405-05": {
+   "orders": 1,
+   "revenue": 600000.0,
+   "new_rev": 600000.0,
+   "ret_rev": 0
+  },
+  "1405-06": {
+   "orders": 3,
+   "revenue": 600000.0,
+   "new_rev": 100000.0,
+   "ret_rev": 500000.0
+  },
+  "1405-07": {
+   "orders": 2,
+   "revenue": 750000.0,
+   "new_rev": 500000.0,
+   "ret_rev": 250000.0
+  }
+ },
+ "cohorts": {
+  "1404-12": {
+   "size": 2,
+   "ret": [
+    100.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ]
+  },
+  "1405-01": {
+   "size": 1,
+   "ret": [
+    100.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    100.0,
+    100.0
+   ]
+  },
+  "1405-02": {
+   "size": 1,
+   "ret": [
+    100.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ]
+  },
+  "1405-03": {
+   "size": 1,
+   "ret": [
+    100.0,
+    100.0,
+    0.0,
+    100.0,
+    0.0
+   ]
+  },
+  "1405-05": {
+   "size": 1,
+   "ret": [
+    100.0,
+    0.0,
+    0.0
+   ]
+  },
+  "1405-06": {
+   "size": 1,
+   "ret": [
+    100.0,
+    0.0
+   ]
+  },
+  "1405-07": {
+   "size": 1,
+   "ret": [
+    100.0
+   ]
+  }
+ },
+ "pareto_top10": 0.4044943820224719,
+ "pareto_top20": 0.5730337078651685,
+ "pareto_top10_count": 1,
+ "product_revenue_plugin": {
+  "1": {
+   "orders": 6,
+   "revenue": 2700000.0
+  },
+  "2": {
+   "orders": 4,
+   "revenue": 1020000.0
+  },
+  "3": {
+   "orders": 4,
+   "revenue": 730000.0
+  }
+ },
+ "product_revenue_total": 4450000.0,
+ "rfm": {
+  "p:09120000005": {
+   "days_since": 222.917,
+   "r": 1,
+   "f": 1,
+   "m": 3,
+   "segment": "hibernating"
+  },
+  "ERASED-14": {
+   "days_since": 214.125,
+   "r": 1,
+   "f": 1,
+   "m": 1,
+   "segment": "hibernating"
+  },
+  "G2": {
+   "days_since": 9.083,
+   "r": 5,
+   "f": 3,
+   "m": 5,
+   "segment": "loyal"
+  },
+  "ERASED-15": {
+   "days_since": 151.125,
+   "r": 1,
+   "f": 1,
+   "m": 2,
+   "segment": "hibernating"
+  },
+  "p:09120000001": {
+   "days_since": 17.5,
+   "r": 3,
+   "f": 3,
+   "m": 5,
+   "segment": "loyal"
+  },
+  "p:09120000002": {
+   "days_since": 70.0,
+   "r": 2,
+   "f": 1,
+   "m": 4,
+   "segment": "hibernating"
+  },
+  "o:18": {
+   "days_since": 25.083,
+   "r": 3,
+   "f": 1,
+   "m": 1,
+   "segment": "new"
+  },
+  "p:09350000002": {
+   "days_since": 17.5,
+   "r": 4,
+   "f": 1,
+   "m": 3,
+   "segment": "new"
+  }
+ },
+ "rfm_cuts": {
+  "recency_days": [
+   17.5,
+   17.500011574074072,
+   70.0,
+   151.125
+  ],
+  "spent": [
+   120000.0,
+   130000.0,
+   500000.0,
+   600000.0
+  ]
+ },
+ "net_sales_total": 4450000.0,
+ "void_order_ids": [
+  17
+ ],
+ "valid_order_ids": [
+  1,
+  2,
+  3,
+  4,
+  5,
+  11,
+  12,
+  13,
+  14,
+  15,
+  16,
+  18
+ ]
+}

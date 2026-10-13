@@ -10,6 +10,18 @@ class CRDR_Admin {
 		add_action( 'admin_menu', array( __CLASS__, 'menu' ) );
 		add_action( 'admin_enqueue_scripts', array( __CLASS__, 'assets' ) );
 		add_action( 'admin_notices', array( 'CRDR_Health', 'admin_notices' ) );
+		add_action( 'admin_init', array( __CLASS__, 'check_schema' ) );
+	}
+
+	/**
+	 * On the plugin's own screens: are the tables complete? An incomplete schema is repaired once (then at most every few minutes) and,
+	 * when that fails, reported by the admin notice. (A version number alone proves nothing: it is written once, tables can change later.)
+	 */
+	public static function check_schema() {
+		$page = isset( $_GET['page'] ) ? sanitize_key( $_GET['page'] ) : ''; // phpcs:ignore WordPress.Security.NonceVerification
+		if ( 0 === strpos( $page, 'customer-radar' ) && current_user_can( CRDR_Actions::CAP ) ) {
+			CRDR_DB::ensure_schema();
+		}
 	}
 
 	public static function menu() {
@@ -22,6 +34,7 @@ class CRDR_Admin {
 		add_submenu_page( 'customer-radar', 'مشتریان', 'مشتریان', $cap, 'customer-radar-customers', array( 'CRDR_Page_Customers', 'render_list' ) );
 		add_submenu_page( 'customer-radar', 'محصولات و مکمل', 'محصولات و مکمل', $cap, 'customer-radar-products', array( 'CRDR_Page_Products', 'render' ) );
 		add_submenu_page( 'customer-radar', 'تنظیمات', 'تنظیمات', $cap, 'customer-radar-settings', array( 'CRDR_Page_Settings', 'render' ) );
+		add_submenu_page( 'customer-radar', 'آموزش', 'آموزش', $cap, 'customer-radar-guide', array( 'CRDR_Page_Guide', 'render' ) );
 		// Hidden page: one customer.
 		add_submenu_page( 'options.php', 'مشتری', 'مشتری', $cap, 'customer-radar-customer', array( 'CRDR_Page_Customers', 'render_detail' ) );
 	}

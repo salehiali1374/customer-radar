@@ -8,8 +8,28 @@ class CRDR_Page_Customers {
 
 	/* -------------------------------------------------------------- call list */
 
+	/**
+	 * While the customer data is being rebuilt (or a rebuild stopped half way) the lists are incomplete and their buttons
+	 * carry row ids that the rebuild hands out again: show why instead of the list.
+	 *
+	 * @return bool true when the page was answered (the caller returns)
+	 */
+	private static function sync_blocked( $title, $active ) {
+		$sync = CRDR_Sync::guard();
+		if ( ! $sync['blocked'] ) {
+			return false;
+		}
+		CRDR_UI::open( $title, $active );
+		CRDR_UI::empty_state( $sync['message'], 'رفتن به داشبورد', admin_url( 'admin.php?page=customer-radar' ) );
+		CRDR_UI::close();
+		return true;
+	}
+
 	public static function render_calls() {
 		global $wpdb;
+		if ( self::sync_blocked( 'فهرست تماس امروز', 'customer-radar-calls' ) ) {
+			return;
+		}
 		$f    = CRDR_Audience::normalize( array_merge( wp_unslash( $_GET ), array( 'view' => 'calls' ) ) ); // phpcs:ignore WordPress.Security.NonceVerification, WordPress.Security.ValidatedSanitizedInput
 		$per  = 50;
 		$page = max( 1, isset( $_GET['paged'] ) ? absint( $_GET['paged'] ) : 1 ); // phpcs:ignore WordPress.Security.NonceVerification
@@ -37,7 +57,7 @@ class CRDR_Page_Customers {
 			$aov   = $r['orders_count'] > 0 ? $r['total_spent'] / $r['orders_count'] : 0;
 			$since = max( 0, ( time() - $r['last_ts'] ) / DAY_IN_SECONDS );
 			$late  = round( $since - $r['avg_gap_days'] );
-			echo '<tr data-id="' . (int) $r['id'] . '">';
+			echo '<tr' . CRDR_Actions::row_attrs( $r ) . '>'; // phpcs:ignore WordPress.Security.EscapeOutput
 			echo '<td><a href="' . esc_url( self::detail_url( $r['id'] ) ) . '"><strong>' . esc_html( $r['name'] ?: '—' ) . '</strong></a></td>';
 			echo '<td class="crdr-ltr">' . esc_html( $r['phone'] ) . '</td>';
 			echo '<td>' . CRDR_UI::badge( $r['segment'] ) . '</td>'; // phpcs:ignore WordPress.Security.EscapeOutput
@@ -70,6 +90,9 @@ class CRDR_Page_Customers {
 
 	public static function render_list() {
 		global $wpdb;
+		if ( self::sync_blocked( 'مشتریان', 'customer-radar-customers' ) ) {
+			return;
+		}
 		$f       = CRDR_Audience::normalize( wp_unslash( $_GET ) ); // phpcs:ignore WordPress.Security.NonceVerification, WordPress.Security.ValidatedSanitizedInput
 		$per     = 50;
 		$page    = max( 1, isset( $_GET['paged'] ) ? absint( $_GET['paged'] ) : 1 ); // phpcs:ignore WordPress.Security.NonceVerification
@@ -86,7 +109,7 @@ class CRDR_Page_Customers {
 		echo '<p class="crdr-muted">' . esc_html( CRDR_UI::num( $tot ) ) . ' مشتری با این فیلتر پیدا شد.</p>';
 
 		$base = CRDR_Audience::to_args( $f );
-		echo '<div class="crdr-scroll"><table class="widefat striped crdr-table"><thead><tr><th>مشتری</th><th>موبایل</th><th>بخش</th><th>R / F / M</th>';
+		echo '<div class="crdr-scroll"><table class="widefat striped crdr-table"><thead><tr><th>مشتری</th><th>موبایل</th><th>بخش</th><th title="R = تازگی خرید، F = تعداد خرید، M = مبلغ خرید؛ هر کدام از ۱ تا ۵ و عدد بیشتر بهتر است">امتیاز R / F / M</th>';
 		foreach ( array( 'orders_count' => 'سفارش‌ها', 'total_spent' => 'جمع خرید', 'last_ts' => 'آخرین خرید', 'priority' => 'اولویت' ) as $col => $label ) {
 			$url = add_query_arg( array_merge( $base, array( 'page' => 'customer-radar-customers', 'orderby' => $col ) ), admin_url( 'admin.php' ) );
 			echo '<th><a href="' . esc_url( $url ) . '">' . esc_html( $label ) . ( $orderby === $col ? ' ▾' : '' ) . '</a></th>';
@@ -99,7 +122,7 @@ class CRDR_Page_Customers {
 			echo '<tr><td><a href="' . esc_url( self::detail_url( $r['id'] ) ) . '"><strong>' . esc_html( $r['name'] ?: '—' ) . '</strong></a></td>';
 			echo '<td class="crdr-ltr">' . esc_html( $r['phone'] ?: '—' ) . '</td>';
 			echo '<td>' . CRDR_UI::badge( $r['segment'] ) . '</td>'; // phpcs:ignore WordPress.Security.EscapeOutput
-			echo '<td class="crdr-ltr">' . esc_html( $r['r'] . ' / ' . $r['f'] . ' / ' . $r['m'] ) . '</td>';
+			echo '<td class="crdr-ltr">' . esc_html( CRDR_Jalali::digits( $r['r'] . ' / ' . $r['f'] . ' / ' . $r['m'] ) ) . '</td>';
 			echo '<td>' . esc_html( CRDR_UI::num( $r['orders_count'] ) ) . '</td>';
 			echo '<td>' . esc_html( CRDR_UI::money( $r['total_spent'] ) ) . '</td>';
 			echo '<td>' . esc_html( CRDR_Jalali::date( $r['last_ts'] ) ) . '</td>';
@@ -114,6 +137,9 @@ class CRDR_Page_Customers {
 
 	public static function render_detail() {
 		global $wpdb;
+		if ( self::sync_blocked( 'مشتری', 'customer-radar-customers' ) ) {
+			return;
+		}
 		$id   = isset( $_GET['id'] ) ? absint( $_GET['id'] ) : 0; // phpcs:ignore WordPress.Security.NonceVerification
 		$c    = CRDR_Actions::customer( $id );
 		CRDR_UI::open( $c ? ( $c['name'] ?: 'مشتری' ) : 'مشتری', 'customer-radar-customers' );
@@ -123,7 +149,7 @@ class CRDR_Page_Customers {
 			return;
 		}
 		$since = max( 0, floor( ( time() - $c['last_ts'] ) / DAY_IN_SECONDS ) );
-		echo '<div class="crdr-card" data-id="' . (int) $c['id'] . '" id="crdr-customer"><div class="crdr-insight-head"><h2>' . esc_html( $c['name'] ?: '—' ) . '</h2>' . CRDR_UI::badge( $c['segment'] ) . '</div>'; // phpcs:ignore WordPress.Security.EscapeOutput
+		echo '<div class="crdr-card"' . CRDR_Actions::row_attrs( $c ) . ' id="crdr-customer"><div class="crdr-insight-head"><h2>' . esc_html( $c['name'] ?: '—' ) . '</h2>' . CRDR_UI::badge( $c['segment'] ) . '</div>'; // phpcs:ignore WordPress.Security.EscapeOutput
 		echo '<p class="crdr-muted"><span class="crdr-ltr">' . esc_html( $c['phone'] ?: 'بدون شماره' ) . '</span> · ' . esc_html( $c['email'] ?: 'بدون ایمیل' ) . '</p>';
 		echo '<div class="crdr-kpis">';
 		CRDR_UI::kpi( 'سفارش‌ها', esc_html( CRDR_UI::num( $c['orders_count'] ) ) );
@@ -131,7 +157,7 @@ class CRDR_Page_Customers {
 		CRDR_UI::kpi( 'میانگین سبد', esc_html( CRDR_UI::money( $c['orders_count'] ? $c['total_spent'] / $c['orders_count'] : 0 ) ) );
 		CRDR_UI::kpi( 'آخرین خرید', esc_html( CRDR_Jalali::date( $c['last_ts'] ) ), CRDR_UI::num( $since ) . ' روز پیش' );
 		CRDR_UI::kpi( 'فاصله‌ی معمول', 'هر ' . esc_html( CRDR_UI::num( round( $c['avg_gap_days'] ) ) ) . ' روز', 'موعد بعدی: ' . CRDR_Jalali::date( $c['due_ts'] ) );
-		CRDR_UI::kpi( 'امتیاز R / F / M', '<span class="crdr-ltr">' . esc_html( $c['r'] . ' / ' . $c['f'] . ' / ' . $c['m'] ) . '</span>' );
+		CRDR_UI::kpi( 'امتیاز R / F / M', '<span class="crdr-ltr">' . esc_html( CRDR_Jalali::digits( $c['r'] . ' / ' . $c['f'] . ' / ' . $c['m'] ) ) . '</span>' );
 		echo '</div>';
 
 		$reco = CRDR_Recommend::for_customer( $c['ckey'] );

@@ -1,0 +1,2 @@
+10dbc10fbe9e04d764a1efa40a42581f986f3fb61f838f3304eb6a2b14328026  customer-radar-1.0.0-rc1.zip
+d2fb9f3f4c24e2b692cbded694b773a38c08dcac60540f846e48e1e2a4ecebec  customer-radar-1.0.0.zip

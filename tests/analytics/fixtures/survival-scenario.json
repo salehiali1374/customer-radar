@@ -1,0 +1,16 @@
+{
+  "note": "Synthetic. 9 customers, each first orders on day 0 and is observed for 400 days. 3 return after 20/25/28 days, 2 after 200/210 days, 4 never return. Used for the re-purchase-curve bias regression test.",
+  "observed_days": 400,
+  "base_ts": 1767225600,
+  "customers": [
+    {"key": "s1", "second_after_days": 20},
+    {"key": "s2", "second_after_days": 25},
+    {"key": "s3", "second_after_days": 28},
+    {"key": "s4", "second_after_days": 200},
+    {"key": "s5", "second_after_days": 210},
+    {"key": "s6", "second_after_days": null},
+    {"key": "s7", "second_after_days": null},
+    {"key": "s8", "second_after_days": null},
+    {"key": "s9", "second_after_days": null}
+  ]
+}

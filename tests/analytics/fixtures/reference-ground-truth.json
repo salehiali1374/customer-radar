@@ -1,0 +1,40 @@
+{
+ "truth_people": 9,
+ "truth_repeaters": [
+  "G2",
+  "p:09120000001"
+ ],
+ "truth_repeat_pct": 0.2222222222222222,
+ "truth_repeat_revenue_pct": 0.5793581960104076,
+ "note": "Ground truth = what a human would say about the same orders. Defect tests assert THESE values; the characterization tests assert reference-expected.json (the plugin's own definitions).",
+ "people_by_order": {
+  "1": "p:09120000001",
+  "2": "p:09120000001",
+  "3": "p:09120000001",
+  "4": "p:09350000002",
+  "5": "p:09120000002",
+  "11": "G2",
+  "12": "G2",
+  "13": "G2",
+  "14": "ERASED-14",
+  "15": "ERASED-15",
+  "16": "p:09120000005",
+  "17": "p:09120000006",
+  "18": "o:18"
+ },
+ "net_sales_excl_tax_shipping": 4450000,
+ "orders_that_are_real_sales": [
+  1,
+  2,
+  3,
+  4,
+  5,
+  11,
+  12,
+  13,
+  14,
+  15,
+  16,
+  18
+ ]
+}

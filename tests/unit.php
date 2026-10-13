@@ -9,6 +9,7 @@ require __DIR__ . '/../includes/class-crdr-stats.php';
 require __DIR__ . '/../includes/class-crdr-template.php';
 require __DIR__ . '/../includes/class-crdr-send-rules.php';
 require __DIR__ . '/../includes/class-crdr-health.php';
+require __DIR__ . '/../includes/class-crdr-site.php';
 
 $fail = 0;
 $pass = 0;
@@ -320,7 +321,8 @@ check( 'response: unreadable body is unknown', $cl( 200, 'not json' )[0], 'unkno
 check( 'response: empty body is unknown', $cl( 200, '' )[0], 'unknown' );
 check( 'response: an undocumented status is unknown', $cl( 200, '{"return":{"status":999}}' )[0], 'unknown' );
 check( 'response: a redirect is unknown', $cl( 302, '' )[0], 'unknown' );
-check( 'response: failure codes list matches the provider\'s documented table (kavenegar.com/rest.html)', CRDR_Send_Rules::definite_failure_codes(), array( 400, 401, 402, 403, 404, 405, 406, 407, 411, 412, 413, 414, 417, 418, 422, 424, 426, 428, 431, 432, 607 ) );
+// PHASE 4.2: re-read against the provider's current table: + 416, 420, 427, 429, 451 (they were missing and fell into "unknown").
+check( 'response: failure codes list matches the provider\'s documented table (kavenegar.com/rest.html)', CRDR_Send_Rules::definite_failure_codes(), array( 400, 401, 403, 404, 405, 406, 407, 411, 412, 413, 414, 416, 417, 418, 420, 422, 424, 426, 427, 428, 429, 431, 432, 451, 501, 607 ) ); // REVIEW 4.2: + 501 (test account: only the owner's number); RELEASE FREEZE: - 402 ("operation failed" does not say the SMS was not processed: unknown)
 
 /* ---- localid ---- */
 check( 'localid layout (ms + 6 digits)', CRDR_Send_Rules::localid( 1790000000000, 42 ), '1790000000000000042' );
@@ -425,30 +427,34 @@ $sc = function ( $status ) {
 };
 check( 'scope: 411 (receptor invalid) is about the RECIPIENT only', $sc( 411 ), array( 'failed', 'recipient' ) );
 check( 'scope: 413 (message empty / too long) and 422 (unsuitable characters) are about the MESSAGE', array( $sc( 413 ), $sc( 422 ) ), array( array( 'failed', 'message' ), array( 'failed', 'message' ) ) );
-foreach ( array( 400, 401, 403, 404, 405, 406, 407, 412, 414, 417, 418, 424, 426, 428, 431, 432, 607 ) as $code ) {
+foreach ( array( 400, 401, 403, 404, 405, 406, 407, 412, 414, 416, 417, 418, 424, 426, 427, 428, 429, 431, 432, 501, 607 ) as $code ) { // PHASE 4.2: + 416 (source IP), 427 (line access level), 429 (IP restricted)
 	check( "scope: $code is an account / key / credit / request problem (fatal: stop, nobody is at fault)", $sc( $code ), array( 'failed', 'fatal' ) );
 }
-check( 'scope: 402 ("operation failed") does not say why, so it is uncertain', $sc( 402 ), array( 'failed', 'uncertain' ) );
+check( 'scope: 402 ("operation failed", no reason) does not say it was NOT processed: stays ambiguous (unknown, never retried, never re-sent with a fresh localid)', $sc( 402 ), array( 'unknown', '' ) );
+check( 'scope: 402 is not a definite failure and has no scope', array( in_array( 402, CRDR_Send_Rules::definite_failure_codes(), true ), CRDR_Send_Rules::code_scope( 402 ) ), array( false, '' ) );
 check( 'scope: 409 ("try later") does not say it was NOT processed: stays ambiguous (unknown, never retried)', $sc( 409 ), array( 'unknown', '' ) );
-check( 'scope: a code that is not in the provider\'s table (451) is ambiguous', $sc( 451 ), array( 'unknown', '' ) );
+// PHASE 4.2: 451 is in the provider's current table ("too many calls in a time window"): a documented, definite, retry-later failure; the ambiguity pin moves to a code that is NOT documented.
+check( 'scope: a code that is not in the provider\'s table (499) is ambiguous', $sc( 499 ), array( 'unknown', '' ) );
+check( 'scope: 451 (too many calls from this IP) is a RATE limit: nothing sent, stop, try again later', $sc( 451 ), array( 'failed', 'rate' ) );
+check( 'scope: 420 (links restricted for this account) is about the MESSAGE text', $sc( 420 ), array( 'failed', 'message' ) );
 check( 'scope: sent has no scope', CRDR_Send_Rules::classify_response( 200, '{"return":{"status":200}}' )['scope'], '' );
 check( 'scope: every documented definite code has exactly one scope', array_values( array_unique( array_map( function ( $c ) {
 	return CRDR_Send_Rules::code_scope( $c );
-}, CRDR_Send_Rules::definite_failure_codes() ) ) ), array( 'fatal', 'uncertain', 'recipient', 'message' ) );
+}, CRDR_Send_Rules::definite_failure_codes() ) ) ), array( 'fatal', 'recipient', 'message', 'rate' ) ); // PHASE 4.2: + 'rate'; RELEASE FREEZE: - 'uncertain' (402 is unknown now)
 check( 'scope: the scope table and the definite list never disagree', array_filter( CRDR_Send_Rules::definite_failure_codes(), function ( $c ) {
 	return '' === CRDR_Send_Rules::code_scope( $c );
 } ), array() );
-check( 'scope: an undocumented code has no scope', CRDR_Send_Rules::code_scope( 451 ), '' );
+check( 'scope: an undocumented code has no scope', CRDR_Send_Rules::code_scope( 499 ), '' );
 
 check( 'failure status: recipient -> rejected', CRDR_Send_Rules::failure_status( 'recipient' ), 'rejected' );
 check( 'failure status: message -> nobuild (same set-aside as an unbuildable message)', CRDR_Send_Rules::failure_status( 'message' ), 'nobuild' );
-check( 'failure status: uncertain -> retry', CRDR_Send_Rules::failure_status( 'uncertain' ), 'retry' );
+check( 'failure status: there is no scope that leads to a timed "retry" any more (402 is unknown)', CRDR_Send_Rules::failure_status( 'uncertain' ), 'failed' );
 check( 'failure status: fatal and gateway stay plain failed (the customer is not penalised)', array( CRDR_Send_Rules::failure_status( 'fatal' ), CRDR_Send_Rules::failure_status( 'gateway' ), CRDR_Send_Rules::failure_status( '' ) ), array( 'failed', 'failed', 'failed' ) );
 check( 'no status that records a failure counts as a contact', array_diff( array( 'failed', 'nobuild', 'retry', 'rejected' ), CRDR_Send_Rules::NOT_CONTACT ), array() );
 check( 'a contact status is never in the not-contact list', array_intersect( array( 'ok', 'unknown', 'pending', 'holdout' ), CRDR_Send_Rules::NOT_CONTACT ), array() );
 check( 'status names fit the varchar(10) column', max( array_map( 'strlen', CRDR_Send_Rules::NOT_CONTACT ) ) <= 10, true );
 
-foreach ( array( 411, 418, 403, 402, 413, 422 ) as $code ) {
+foreach ( array( 411, 418, 403, 413, 422, 501 ) as $code ) {
 	$why = CRDR_Send_Rules::failure_reason( $code );
 	check( "reason $code: Persian, names the code, no provider text", 1 === preg_match( '/\p{Arabic}/u', $why ) && false !== strpos( $why, (string) $code ), true );
 }
@@ -501,9 +507,18 @@ check( 'outcome: which statuses count as a contact for cooldown', array_values( 
 check( 'outcome: which statuses use up the daily cap (possibly sent)', array_values( array_filter( $all_statuses, function ( $s ) use ( $oc ) {
 	return $oc( $s )['cap'];
 } ) ), array( 'pending', 'ok', 'unknown' ) );
-check( 'outcome: only an accepted message is measured as "treated"', array_values( array_filter( $all_statuses, function ( $s ) use ( $oc ) {
+// RELEASE FREEZE (D4): the comparison is by INTENTION TO TREAT (CRDR_Playbooks::results): everybody first assigned to the message or to the control is measured,
+// whatever happened to the SMS. The old expectation ('ok' and 'holdout' only) described the pre-ITT definition.
+check( 'outcome: "measured" = every status that can be a first ASSIGNMENT (intention to treat), not only accepted messages', array_values( array_filter( $all_statuses, function ( $s ) use ( $oc ) {
 	return $oc( $s )['measured'];
-} ) ), array( 'ok', 'holdout' ) );
+} ) ), array( 'pending', 'ok', 'unknown', 'failed', 'retry', 'nobuild', 'rejected', 'holdout' ) );
+check( 'outcome: not measured = nobody was assigned (no recommendation found) and an unrecognised status', array( $oc( 'norec' )['measured'], $oc( 'something-new' )['measured'] ), array( false, false ) );
+check( 'outcome: the list the results query uses is the one "measured" is derived from', CRDR_Send_Rules::ASSIGNED, array_values( array_filter( $all_statuses, function ( $s ) use ( $oc ) {
+	return $oc( $s )['measured'];
+} ) ) );
+check( 'outcome: only an ACCEPTED message is in the secondary "accepted" group (the primary comparison does not need it)', array_values( array_filter( $all_statuses, function ( $s ) use ( $oc ) {
+	return 'accepted' === $oc( $s )['group'];
+} ) ), array( 'ok' ) );
 check( 'outcome: the contact flag agrees with the not-contact list used by the SQL', array_values( array_filter( $all_statuses, function ( $s ) use ( $oc ) {
 	return ! $oc( $s )['contact'];
 } ) ), array( 'failed', 'retry', 'nobuild', 'rejected' ) );
@@ -530,6 +545,111 @@ check( 'cron, WP-Cron on: 47h is fine, 49h is a problem (a visit would have run 
 foreach ( array( true, false ) as $disabled ) {
 	check( 'cron message (' . ( $disabled ? 'host cron' : 'WP-Cron' ) . '): Persian, says the hours, says automatic campaigns send nothing, says what to do', 1 === preg_match( '/\p{Arabic}/u', CRDR_Health::cron_message( 6 * $H, $disabled ) ) && false !== strpos( CRDR_Health::cron_message( 6 * $H, $disabled ), '۶' ) && false !== mb_strpos( CRDR_Health::cron_message( 6 * $H, $disabled ), 'پیامکی نمی‌فرستند' ) && false !== strpos( CRDR_Health::cron_message( 6 * $H, $disabled ), 'cron' ), true );
 }
+
+// Phase 4.1: a promotional template must carry the opt-out phrase
+$promo = array( 'require_optout' => true );
+check( 'optout required: a text without {optout} is refused, with a message that names {optout}', array( count( CRDR_Template::validate( 'سلام {name} عزیز، تخفیف ویژه', $promo ) ), false !== mb_strpos( CRDR_Template::validate( 'سلام {name}', $promo )[0], '{optout}' ) ), array( 1, true ) );
+check( 'optout required: a text with {optout} (anywhere) is accepted', array( CRDR_Template::validate( 'سلام {name} {optout}', $promo ), CRDR_Template::validate( '{optout} سلام', $promo ) ), array( array(), array() ) );
+check( 'optout required: not asked for when the context does not say so (system texts)', CRDR_Template::validate( 'سلام {name}', array() ), array() );
+check( 'optout required: "{ optout }" or "{Optout}" is not {optout} (and is also unknown)', count( CRDR_Template::validate( 'سلام {Optout}', $promo ) ) >= 2, true );
+check( 'optout required: both messages are reported (missing phrase + other problems)', count( CRDR_Template::validate( 'سلام {coupon}', $promo ) ), 2 );
+$r = CRDR_Template::render( 'سلام {name} {optout}', array( '{name}' => 'علی', '{optout}' => '' ), array() );
+check( 'optout phrase empty in the settings: the message is NOT buildable (it is not an optional value)', array( $r['ok'], $r['missing'] ), array( false, array( '{optout}' ) ) );
+check( 'optout phrase empty: the explanation says what is wrong in the settings', false !== mb_strpos( CRDR_Template::explain( $r ), 'عبارت لغو عضویت' ), true );
+$r = CRDR_Template::render( 'سلام {name} {optout}', array( '{name}' => 'علی', '{optout}' => 'لغو۱۱' ), array() );
+check( 'optout phrase set: the message is built with it', array( $r['ok'], $r['text'] ), array( true, 'سلام علی لغو۱۱' ) );
+
+// ---- Phase 4.2: every code of the provider's "return codes" table (kavenegar.com/rest.html, re-read for this phase), one by one ----------
+// state / scope / contact status that follows. The provider's page does not say for any code whether the message was processed; "failed" below is an
+// inference from what the code IS (access, content-policy, rate-limit, validation), "unknown" is what is not safely so.
+$table = array(
+	400 => array( 'failed', 'fatal' ), 401 => array( 'failed', 'fatal' ), 402 => array( 'unknown', '' ),   // RELEASE FREEZE: "operation failed" without a reason: not proven unprocessed, so never retried
+	403 => array( 'failed', 'fatal' ),
+	404 => array( 'failed', 'fatal' ), 405 => array( 'failed', 'fatal' ), 406 => array( 'failed', 'fatal' ), 407 => array( 'failed', 'fatal' ),
+	409 => array( 'unknown', '' ),   // "server cannot respond now, try later": says nothing about whether it processed the request
+	411 => array( 'failed', 'recipient' ), 412 => array( 'failed', 'fatal' ), 413 => array( 'failed', 'message' ), 414 => array( 'failed', 'fatal' ),
+	415 => array( 'unknown', '' ),   // list endpoints only (start index): cannot come from a single send; unknown if it ever does
+	416 => array( 'failed', 'fatal' ),   // source IP does not match the configured settings: authorisation, every customer
+	417 => array( 'failed', 'fatal' ), 418 => array( 'failed', 'fatal' ),
+	419 => array( 'unknown', '' ),   // array lengths differ: SendArray only, cannot come from a single send
+	420 => array( 'failed', 'message' ), // links in the text are restricted for this account: the text, not the customer
+	422 => array( 'failed', 'message' ), 424 => array( 'failed', 'fatal' ), 426 => array( 'failed', 'fatal' ),
+	427 => array( 'failed', 'fatal' ),   // this line needs an access level set up: every customer
+	428 => array( 'failed', 'fatal' ),
+	429 => array( 'failed', 'fatal' ),   // IP restricted: every customer, an administrator must act
+	431 => array( 'failed', 'fatal' ), 432 => array( 'failed', 'fatal' ),
+	451 => array( 'failed', 'rate' ),    // too many calls in a time window: throttled, nothing wrong with customer or text; stop and try again later
+	501 => array( 'failed', 'fatal' ),   // REVIEW 4.2: in the provider's Table 1 (only test messages to the account owner's number): refused for everybody
+	607 => array( 'failed', 'fatal' ),
+);
+foreach ( $table as $code => $want ) {
+	$r = CRDR_Send_Rules::classify_response( $code, json_encode( array( 'return' => array( 'status' => $code, 'message' => 'x' ) ) ) );
+	check( "provider table: code $code -> {$want[0]} / " . ( '' === $want[1] ? '(no scope)' : $want[1] ), array( $r['state'], $r['scope'] ), $want );
+}
+check( 'provider table: all 30 documented codes are covered by this test (a code added to the code but not here is caught by the next line)', count( $table ), 30 );
+check( 'provider table: every "failed" code has a Persian reason that carries the code and none of the provider\'s own wording', count( array_filter( array_keys( array_filter( $table, function ( $w ) {
+	return 'failed' === $w[0];
+} ) ), function ( $c ) {
+	$m = CRDR_Send_Rules::failure_reason( $c );
+	return false === strpos( $m, (string) $c ) || false !== strpos( $m, 'documented code' );
+} ) ), 0 );
+$generic = CRDR_Send_Rules::failure_reason( 499 );
+check( 'provider table: the five codes added in Phase 4.2 each have their own explanation (not the generic one), and the explanation says what to do', count( array_filter( array( 416, 420, 427, 429, 451, 501 ), function ( $c ) use ( $generic ) {
+	return CRDR_Send_Rules::failure_reason( $c ) === str_replace( '499', (string) $c, $generic );
+} ) ), 0 );
+check( 'provider table: the new scopes lead to contact statuses that are NOT contacts (nothing was sent): rate -> failed, message -> nobuild', array( CRDR_Send_Rules::failure_status( 'rate' ), CRDR_Send_Rules::failure_status( 'message' ), in_array( 'failed', CRDR_Send_Rules::NOT_CONTACT, true ) ), array( 'failed', 'nobuild', true ) );
+
+// ---- nothing unrecognised is ever "sent", and nothing unrecognised is ever a safe retry --------------------------------------------------
+$bad = array();
+for ( $s = 0; $s <= 999; $s++ ) {
+	if ( 200 === $s || isset( $table[ $s ] ) ) {
+		continue;
+	}
+	foreach ( array( 200, 201, 202, 400, 404, 429, 500, 502, 504, 302 ) as $http ) {
+		$r = CRDR_Send_Rules::classify_response( $http, json_encode( array( 'return' => array( 'status' => $s ) ) ) );
+		if ( 'unknown' !== $r['state'] ) {
+			$bad[] = "$http/$s -> " . $r['state'];
+		}
+	}
+}
+check( 'unrecognised: for every status 0..999 that is neither 200 nor in the provider\'s table, under ten different HTTP codes, the result is "unknown" (not sent, not a safe retry)', $bad, array() );
+$bad = array();
+foreach ( array( '', 'not json', '[]', '{}', '{"return":null}', '{"return":{}}', '{"return":{"status":"ok"}}', '{"return":{"status":"200"}}x', 'null', '200' ) as $body ) {
+	foreach ( array( 200, 201, 204, 500, 0 ) as $http ) {
+		$r = CRDR_Send_Rules::classify_response( $http, $body );
+		if ( 'sent' === $r['state'] || 'failed' === $r['state'] ) {
+			$bad[] = "$http / " . substr( $body, 0, 20 ) . ' -> ' . $r['state'];
+		}
+	}
+}
+check( 'unrecognised: an unreadable, empty or malformed answer is "unknown" under any HTTP code', $bad, array() );
+check( 'unrecognised: ONLY "HTTP 200 and return.status 200" is accepted: 200 with a different status, and a different HTTP code with status 200, are not', array(
+	CRDR_Send_Rules::classify_response( 200, '{"return":{"status":200}}' )['state'],
+	CRDR_Send_Rules::classify_response( 200, '{"return":{"status":201}}' )['state'],
+	CRDR_Send_Rules::classify_response( 202, '{"return":{"status":200}}' )['state'],
+	CRDR_Send_Rules::classify_response( 500, '{"return":{"status":200}}' )['state'],
+), array( 'sent', 'unknown', 'unknown', 'unknown' ) );
+
+// ---- the masked excerpt of another plugin's error text ------------------------------------------------------------------------------
+$ex = CRDR_Send_Rules::safe_excerpt( 'HTTP 500 from https://api.example.com/v1/send?key=abcdefghijklmnop1234567890XYZ&to=09121234567 token=SECRETSECRETSECRET99 failed', array( 'SECRETKEY1' ) );
+check( 'excerpt: no link, no long token, no phone number survive', array( false === strpos( $ex, 'http' ), false === strpos( $ex, 'abcdefghijklmnop' ), false === strpos( $ex, 'SECRETSECRET' ), false === strpos( $ex, '09121234567' ) ), array( true, true, true, true ) );
+check( 'excerpt: what is left is still readable (the status words stay)', false !== strpos( $ex, 'HTTP 500' ) && false !== strpos( $ex, 'failed' ), true );
+check( 'excerpt: a known secret is removed even when short', false === strpos( CRDR_Send_Rules::safe_excerpt( 'bad key SECRETKEY1 here', array( 'SECRETKEY1' ) ), 'SECRETKEY1' ), true );
+check( 'excerpt: cut to the limit, control characters become spaces', array( mb_strlen( CRDR_Send_Rules::safe_excerpt( str_repeat( 'خطا ', 100 ), array(), 40 ) ) <= 41, false === strpos( CRDR_Send_Rules::safe_excerpt( "a\0b\x07c\r\nd" ), "\0" ) ), array( true, true ) );
+check( 'excerpt: empty and Persian text', array( CRDR_Send_Rules::safe_excerpt( '' ), CRDR_Send_Rules::safe_excerpt( 'اعتبار کافی نیست' ) ), array( '', 'اعتبار کافی نیست' ) );
+
+// ---- Phase 4.2: the site address that identifies "this shop" (CRDR_Site::normalize) -------------------------------------------------------
+$n = array( 'CRDR_Site', 'normalize' );
+check( 'site address: scheme, www, case and a trailing slash do not make a different site', array( $n( 'https://Shop.Example.COM/' ), $n( 'http://shop.example.com' ), $n( 'https://www.shop.example.com/' ), $n( 'HTTP://WWW.SHOP.EXAMPLE.COM//' ) ), array_fill( 0, 4, 'shop.example.com' ) );
+check( 'site address: moving to https (same host, same path) is not a move', $n( 'http://example.ir/shop' ) === $n( 'https://example.ir/shop/' ), true );
+check( 'site address: a sub-directory install keeps its path (it is a different site from the root)', array( $n( 'https://example.ir/shop' ), $n( 'https://example.ir' ) ), array( 'example.ir/shop', 'example.ir' ) );
+check( 'site address: a staging sub-domain is a different site', $n( 'https://staging.example.ir' ) !== $n( 'https://example.ir' ), true );
+check( 'site address: a non-default port counts, the default ports do not', array( $n( 'http://localhost:8091' ), $n( 'https://example.ir:443' ), $n( 'http://example.ir:80/x' ) ), array( 'localhost:8091', 'example.ir', 'example.ir/x' ) );
+check( 'site address: query string and fragment are not part of it', $n( 'https://example.ir/shop/?a=1#top' ), 'example.ir/shop' );
+check( 'site address: a different port on the same host is a different site', $n( 'http://localhost:8091' ) !== $n( 'http://localhost:8092' ), true );
+check( 'site address: a trailing dot on the host and repeated slashes in the path', array( $n( 'https://example.ir./a//b/' ) ), array( 'example.ir/a/b' ) );
+check( 'site address: an address without a scheme, an empty one and nonsense never throw', array( $n( 'example.ir/shop' ), $n( '' ), $n( '   ' ), is_string( $n( '::::' ) ), is_string( $n( 'http://' ) ) ), array( 'example.ir/shop', '', '', true, true ) );
+check( 'site address: an IP address host and an IPv6 one', array( $n( 'http://192.168.1.10/shop' ), $n( 'http://[::1]:8080/' ) ), array( '192.168.1.10/shop', '[::1]:8080' ) );
 
 echo "\n$pass passed, $fail failed\n";
 exit( $fail ? 1 : 0 );

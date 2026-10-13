@@ -5,6 +5,7 @@ class CRDR_Page_Growth {
 
 	public static function render() {
 		CRDR_UI::open( 'رشد و پیشنهادها', 'customer-radar-growth', 'پیشنهادهایی که فقط از سفارش‌های خودِ فروشگاه شما ساخته شده‌اند، به ترتیب اهمیت.' );
+		CRDR_UI::sync_banner();
 		$cards = CRDR_Insights::generate();
 		if ( ! $cards ) {
 			CRDR_UI::empty_state( 'برای ساختن پیشنهاد، اول از داشبورد «تحلیل سفارش‌ها» را بزنید.', 'رفتن به داشبورد', admin_url( 'admin.php?page=customer-radar' ) );

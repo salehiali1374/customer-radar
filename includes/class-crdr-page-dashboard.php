@@ -10,18 +10,26 @@ class CRDR_Page_Dashboard {
 		$st    = CRDR_Analytics::get();
 		CRDR_UI::open( 'رادار مشتری', 'customer-radar', 'ببینید چه کسانی وفادارند، چه کسانی در حال رفتن‌اند و امروز چه کاری بیشترین فروش را برمی‌گرداند.' );
 
+		if ( isset( $_GET['site'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification -- only chooses which message to show
+			if ( 'confirmed' === sanitize_key( $_GET['site'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification
+				CRDR_UI::notice( 'success', 'نشانی این سایت به‌عنوان سایت اصلی تأیید شد؛ اجرای خودکار کمپین‌ها در اجرای بعدی دوباره فعال است.' );
+			} else {
+				CRDR_UI::notice( 'error', 'نشانی تأیید نشد.' );
+			}
+		}
+		CRDR_UI::sync_banner();
 		echo '<div class="crdr-card crdr-sync"><div><strong>آخرین به‌روزرسانی داده‌ها:</strong> ';
 		if ( ! empty( $state['finished'] ) ) {
 			echo esc_html( CRDR_Jalali::date( $state['finished'] ) . ' — ' . CRDR_Jalali::digits( wp_date( 'H:i', $state['finished'] ) ) );
 		} else {
 			echo 'هنوز انجام نشده';
 		}
-		echo '</div><div class="crdr-muted">سفارش‌ها هر شب خودکار تحلیل می‌شوند. برای دیدن نتیجه‌ی همین حالا دکمه را بزنید.</div>';
+		echo '</div><div class="crdr-muted">سفارش‌ها هر شب خودکار تحلیل می‌شوند. برای دیدن نتیجه‌ی همین حالا دکمه را بزنید. تحلیل به سفارش‌ها دست نمی‌زند و فقط اطلاعات خود افزونه را دوباره می‌سازد؛ در این مدت (از چند ثانیه تا چند دقیقه، بسته به تعداد سفارش‌ها) ارسال پیامک موقتاً متوقف است و صفحه را نباید ببندید.</div>';
 		echo '<p><button type="button" class="button button-primary" id="crdr-sync">تحلیل سفارش‌ها</button> <span id="crdr-sync-status" class="crdr-muted"></span></p>';
 		echo '<div class="crdr-progress" id="crdr-progress" hidden><div></div></div></div>';
 
 		if ( empty( $st['orders_total'] ) ) {
-			CRDR_UI::empty_state( 'هنوز سفارشی تحلیل نشده است. دکمه‌ی «تحلیل سفارش‌ها» را بزنید. فقط سفارش‌های با وضعیت‌های انتخاب‌شده در تنظیمات (پیش‌فرض: تکمیل‌شده و در حال انجام) شمرده می‌شوند.' );
+			CRDR_UI::empty_state( 'هنوز سفارشی تحلیل نشده است. دکمه‌ی «تحلیل سفارش‌ها» را بزنید. فقط سفارش‌های با وضعیت‌های انتخاب‌شده در تنظیمات (پیش‌فرض: تکمیل‌شده و در حال انجام) شمرده می‌شوند. اگر فروشگاه تازه است و هنوز سفارشی ندارید، صفحه‌ی «آموزش» را ببینید.', 'آموزش', admin_url( 'admin.php?page=customer-radar-guide' ) );
 			CRDR_UI::close();
 			return;
 		}
@@ -35,17 +43,33 @@ class CRDR_Page_Dashboard {
 		echo '<p>مشتری وفادار فقط کسی نیست که زیاد خرید کرده؛ کسی است که <strong>دوباره و به‌موقع برمی‌گردد</strong>. به همین دلیل رادار مشتری برای هر نفر سه چیز را می‌سنجد: <em>چند وقت پیش خرید کرده</em>، <em>چند بار خرید کرده</em> و <em>چقدر خرج کرده</em>.</p>';
 		echo '<p>در فروشگاه شما <strong>' . esc_html( CRDR_UI::pct( $rep['customers_pct'] ) ) . '</strong> مشتریان (' . esc_html( CRDR_UI::num( $rep['customers'] ) ) . ' نفر) بیش از یک‌بار خرید کرده‌اند و همین‌ها <strong>' . esc_html( CRDR_UI::pct( $rep['revenue_pct'] ) ) . '</strong> فروش را ساخته‌اند.</p>';
 		echo '<ul class="crdr-steps"><li><strong>مشتری تازه:</strong> هدف خرید دوم است ← کمپین «خرید دوم».</li><li><strong>مشتری منظم:</strong> فقط یادآوری سر موعد، بدون تخفیف ← «یادآوری موعد خرید».</li><li><strong>مشتری در حال رفتن:</strong> پیشنهاد محدود یا تماس شخصی ← «بازگشت مشتری در خطر».</li></ul>';
-		echo '<p><a class="button button-primary" href="' . esc_url( admin_url( 'admin.php?page=customer-radar-growth' ) ) . '">دیدن پیشنهادهای رشد برای فروشگاه من</a> <a class="button" href="' . esc_url( admin_url( 'admin.php?page=customer-radar-campaigns' ) ) . '">کمپین‌های آماده</a></p></details>';
+		echo '<p><a class="button button-primary" href="' . esc_url( admin_url( 'admin.php?page=customer-radar-growth' ) ) . '">دیدن پیشنهادهای رشد برای فروشگاه من</a> <a class="button" href="' . esc_url( admin_url( 'admin.php?page=customer-radar-campaigns' ) ) . '">کمپین‌های آماده</a> <a class="button" href="' . esc_url( admin_url( 'admin.php?page=customer-radar-guide' ) ) . '">آموزش گام‌به‌گام</a></p></details>';
 
 		/* ---- KPIs */
 		echo '<div class="crdr-kpis">';
 		CRDR_UI::kpi( 'مشتریان', esc_html( CRDR_UI::num( $total ) ) );
-		CRDR_UI::kpi( 'مشتریان تکرارشونده', esc_html( CRDR_UI::pct( $rep['customers_pct'] ) ), 'سهم از فروش: ' . CRDR_UI::pct( $rep['revenue_pct'] ) );
+		CRDR_UI::kpi( 'مشتریان تکرارشونده', esc_html( CRDR_UI::pct( $rep['customers_pct'] ) ), 'سهم از فروش: ' . CRDR_UI::pct( $rep['revenue_pct'] ) . ( null !== $rep['customers_pct_mature'] ? ' · میان مشتریان با حداقل ' . CRDR_UI::num( CRDR_Analytics::TENURE_DAYS ) . ' روز سابقه: ' . CRDR_UI::pct( $rep['customers_pct_mature'] ) : '' ) );
 		CRDR_UI::kpi( 'فاصله‌ی معمول دو خرید', null !== $st['gap_median'] ? esc_html( CRDR_UI::num( round( $st['gap_median'] ) ) ) . ' روز' : '—', 'میانه‌ی خریدهای تکراری' );
 		CRDR_UI::kpi( 'میانگین سفارش', esc_html( CRDR_UI::money( $st['aov']['mean'] ) ), 'میانه: ' . CRDR_UI::money( $st['aov']['p50'] ) );
-		CRDR_UI::kpi( 'جمع فروش تحلیل‌شده', esc_html( CRDR_UI::money( array_sum( array_column( $st['monthly'], 'revenue' ) ) ) ), 'در ۲۴ ماه اخیر' );
+		CRDR_UI::kpi( 'جمع فروش خالص', esc_html( CRDR_UI::money( array_sum( array_column( $st['monthly'], 'revenue' ) ) ) ), 'در ۲۴ ماه اخیر · پس از کسر مرجوعی، بدون هزینه‌ی ارسال و مالیات' );
 		CRDR_UI::kpi( 'در فهرست تماس امروز', esc_html( CRDR_UI::num( $call['n'] ) ) . ' نفر', 'میانگین سبد: ' . CRDR_UI::money( $call['aov'] ) );
 		echo '</div>';
+
+		/* ---- how fast customers come back (customers still inside the window are left out of each figure) */
+		if ( ! empty( $st['return_within'] ) ) {
+			$parts = array();
+			foreach ( $st['return_within'] as $rw ) {
+				if ( null !== $rw['p'] ) {
+					$parts[] = CRDR_UI::pct( $rw['p'] ) . ' تا ' . CRDR_UI::num( $rw['days'] ) . ' روز (از ' . CRDR_UI::num( $rw['n'] ) . ' مشتری)';
+				}
+			}
+			if ( $parts ) {
+				echo '<p class="crdr-muted">سهم مشتریانی که خرید دوم را انجام داده‌اند: ' . esc_html( implode( ' · ', $parts ) ) . '. مشتریانی که هنوز به آن مدت نرسیده‌اند و برنگشته‌اند در همان عدد نیامده‌اند، چون پاسخشان هنوز معلوم نیست.</p>';
+			}
+		}
+		if ( ! empty( $st['refund_gap']['orders'] ) ) {
+			echo '<p class="crdr-bad">برای ' . esc_html( CRDR_UI::num( $st['refund_gap']['orders'] ) ) . ' سفارش، مبلغ مرجوعی ثبت‌شده با اقلام سفارش جور درنیامد (جمعاً ' . esc_html( CRDR_UI::money( $st['refund_gap']['amount'] ) ) . '). این مبلغ در هیچ عددی کسر نشده و جداگانه گزارش می‌شود؛ سفارش‌های مربوط را در ووکامرس بررسی کنید.</p>';
+		}
 
 		/* ---- charts */
 		echo '<div class="crdr-grid">';

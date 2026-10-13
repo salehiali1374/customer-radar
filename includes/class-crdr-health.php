@@ -32,12 +32,15 @@ class CRDR_Health {
 	/* ------------------------------------------------------- pure state rules */
 
 	public static function codes() {
-		return array( 'template', 'no_provider', 'busy', 'window_invalid', 'not_auto', 'mode_off', 'other' );
+		return array( 'template', 'no_provider', 'busy', 'window_invalid', 'not_auto', 'mode_off', 'schema', 'db_error', 'site_changed', 'other' );
 	}
 
-	/** Expected, not a problem: nothing is recorded for it. */
+	/**
+	 * Expected, or reported elsewhere: nothing is recorded per campaign for it. Being outside the sending hours is normal; a
+	 * customer-data rebuild that is running, stalled or failed is one global condition with its own warning (notice_html).
+	 */
 	public static function is_recorded( $code ) {
-		return 'outside_window' !== $code;
+		return ! in_array( $code, array( 'outside_window', 'sync_running', 'sync_stalled', 'sync_failed', 'rebuild_required' ), true );
 	}
 
 	/** A sending window must start before it ends; one that wraps midnight is not supported, so it never opens. */
@@ -130,6 +133,9 @@ class CRDR_Health {
 			'window_invalid' => 'ساعت مجاز ارسال نامعتبر است (ساعت شروع باید کوچک‌تر از پایان باشد؛ بازه‌ی شبانه مثل ۲۲ تا ۶ پشتیبانی نمی‌شود)؛ در «تنظیمات» اصلاحش کنید.',
 			'not_auto'       => 'حالت این کمپین «خودکار» نیست.',
 			'mode_off'       => 'این کمپین غیرفعال است.',
+			'schema'         => 'جدول‌های افزونه در پایگاه‌داده کامل نیستند و پیامکی فرستاده نمی‌شود؛ افزونه را غیرفعال و دوباره فعال کنید و اگر ادامه داشت از میزبان بخواهید اجازه‌ی ساخت و تغییر جدول (CREATE و ALTER) را به کاربر پایگاه‌داده بدهد.',
+			'db_error'       => 'خطای پایگاه‌داده هنگام خواندن یا ثبت اطلاعات؛ هیچ پیامکی با اطمینان ارسال نشد و اجرا متوقف شد. وضعیت جدول‌های افزونه را بررسی کنید (غیرفعال و دوباره فعال کردن افزونه کمبودها را برمی‌گرداند)؛ اگر ادامه داشت، با میزبان تماس بگیرید.',
+			'site_changed'   => 'نشانی این سایت با نشانی ثبت‌شده‌ی رادار مشتری یکی نیست (کپی، محیط آزمایشی یا انتقال سایت)؛ برای جلوگیری از ارسال خودکار پیامک به مشتریان واقعی، اجرای خودکار متوقف شد. اگر این سایت اصلی است، در داشبورد نشانی جدید را تأیید کنید.',
 			'other'          => 'اجرای خودکار این کمپین انجام نشد؛ کمپین و تنظیمات را بررسی کنید.',
 		);
 		return isset( $m[ $code ] ) ? $m[ $code ] : $m['other'];
@@ -225,6 +231,9 @@ class CRDR_Health {
 		if ( 'template' === $code ) {
 			return admin_url( 'admin.php?page=customer-radar-campaigns&edit=' . rawurlencode( $id ) );
 		}
+		if ( 'site_changed' === $code ) {
+			return admin_url( 'admin.php?page=customer-radar' );
+		}
 		return admin_url( 'admin.php?page=customer-radar-campaigns' );
 	}
 
@@ -249,16 +258,37 @@ class CRDR_Health {
 				. ' <span class="description">(از ' . esc_html( self::when( $b['since'] ) ) . ')</span> <a href="' . esc_url( self::fix_url( $id, $b['code'] ) ) . '">رفع مشکل</a></li>';
 		}
 		$cron    = '';
+		$schema  = get_option( CRDR_DB::SCHEMA_ERROR );
+		if ( is_array( $schema ) && ! empty( $schema['problems'] ) ) { // the tables are not complete: nothing can be sent, say so on the plugin's own screens
+			$cron .= '<p><strong>' . esc_html( CRDR_DB::schema_message( (array) $schema['problems'] ) ) . '</strong></p>';
+		}
 		$overdue = $has_auto ? self::cron_overdue( (int) wp_next_scheduled( CRDR_Playbooks::HOURLY ), time(), self::wp_cron_disabled() ) : 0;
 		if ( $overdue ) { // nothing here would otherwise tell the owner: a scheduler that does not run leaves no trace of its own
 			$cron = '<p>' . esc_html( self::cron_message( $overdue, self::wp_cron_disabled() ) ) . '</p>';
 		}
+		// A rebuild that stalled or failed leaves no trace of its own (nobody is watching a background job) and blocks all
+		// sending, so it is said here, once, to administrators. A rebuild that is simply running is shown on the pages it affects.
+		$sync = CRDR_Sync::guard();
+		if ( $sync['blocked'] && 'sync_running' !== $sync['code'] ) {
+			$cron .= '<p><strong>' . esc_html( $sync['message'] ) . '</strong></p>';
+		}
+		// The last rebuild could not add some orders that were eligible (see CRDR_Sync::reconcile): the numbers are slightly low.
+		if ( false !== get_option( CRDR_DB::REBUILD_OPTION, false ) ) { // an update is waiting for its first rebuild: sending is paused until then
+			$cron .= '<p><strong>' . esc_html( CRDR_Sync::rebuild_required_message() ) . '</strong></p>';
+		}
+		$last = CRDR_Sync::state();
+		if ( 'done' === $last['phase'] && ! empty( $last['unresolved'] ) ) {
+			$cron .= '<p>' . esc_html( 'در آخرین به‌روزرسانی، ' . CRDR_Jalali::digits( (string) (int) $last['unresolved'] ) . ' سفارش که باید شمرده می‌شد خوانده نشد؛ آمار ممکن است کمی کمتر از واقعی باشد. «تحلیل سفارش‌ها» را دوباره بزنید.' ) . '</p>';
+		} elseif ( 'done' === $last['phase'] && ! empty( $last['unverified'] ) ) {
+			$cron .= '<p>' . esc_html( 'در آخرین به‌روزرسانی، سفارش‌ها آن‌قدر پشت‌سرهم تغییر می‌کردند که بررسی نهایی کامل نشد؛ آمار ممکن است کمی ناقص باشد. «تحلیل سفارش‌ها» را دوباره بزنید.' ) . '</p>';
+		}
+		$site = CRDR_Site::notice_html();
 		if ( '' === $items && '' === $cron ) {
-			return '';
+			return $site;
 		}
 		return '<div class="notice notice-warning">'
 			. ( '' !== $items ? '<p><strong>رادار مشتری: ارسال خودکار بعضی کمپین‌ها متوقف شده و پیامکی نمی‌رود.</strong></p><ul style="list-style:disc;margin-inline-start:20px">' . $items . '</ul>' : '' )
-			. $cron . '</div>';
+			. $cron . '</div>' . $site;
 	}
 
 	/** admin_notices: the dashboard and this plugin's own screens (not every admin page). */

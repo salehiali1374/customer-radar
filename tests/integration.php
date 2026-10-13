@@ -4,7 +4,17 @@
  *   wp eval-file wp-content/plugins/customer-radar/tests/integration.php
  *
  * Needs: WooCommerce with the seeded Persian test catalogue (gen2.php) and the PWSMS stub mu-plugin.
+ *
+ * PREREQUISITE (found in Phase 4.2): the seeded shop must use HPOS (WooCommerce custom order tables). The generator writes the final
+ * order statuses straight into the HPOS table; on a shop that still uses the legacy post storage every order stays "pending", the
+ * plugin (correctly) counts none of them, and this test fails for a reason that has nothing to do with the plugin. Enable HPOS BEFORE
+ * seeding:  wp wc hpos sync, then wp wc hpos enable  (then run gen2.php). The test refuses to
+ * run when it sees legacy storage or a shop without counted orders. Details: docs/test-environment.md.
  */
+if ( class_exists( '\Automattic\WooCommerce\Utilities\OrderUtil' ) && ! \Automattic\WooCommerce\Utilities\OrderUtil::custom_orders_table_usage_is_enabled() ) {
+	echo "REFUSING TO RUN: order storage is the legacy post storage; the seeded test shop needs HPOS (see the header of this file and docs/test-environment.md).\n";
+	return;
+}
 $GLOBALS['P'] = 0;
 $GLOBALS['F'] = 0;
 function t( $name, $cond, $extra = '' ) {

@@ -1,0 +1,424 @@
+{
+ "note": "Independent worked answers for CRDR_Sales::allocate (see generate_refund_scenarios.py). Amounts in currency units.",
+ "scenarios": [
+  {
+   "name": "line-level refund on one line",
+   "lines": [
+    {
+     "total": 100000,
+     "refund": 0
+    },
+    {
+     "total": 200000,
+     "refund": 80000
+    },
+    {
+     "total": 300000,
+     "refund": 0
+    }
+   ],
+   "refund_total": 80000,
+   "refund_shipping": 0,
+   "refund_tax": 0,
+   "order_total": 710000,
+   "expect": {
+    "lines": [
+     100000.0,
+     120000.0,
+     300000.0
+    ],
+    "net": 520000.0,
+    "gap": 0.0,
+    "reasons": {},
+    "void": false
+   }
+  },
+  {
+   "name": "order-level refund only (no line chosen): spread in proportion",
+   "lines": [
+    {
+     "total": 100000,
+     "refund": 0
+    },
+    {
+     "total": 200000,
+     "refund": 0
+    },
+    {
+     "total": 300000,
+     "refund": 0
+    }
+   ],
+   "refund_total": 120000,
+   "refund_shipping": 0,
+   "refund_tax": 0,
+   "order_total": 600000,
+   "expect": {
+    "lines": [
+     80000.0,
+     160000.0,
+     240000.0
+    ],
+    "net": 480000.0,
+    "gap": 0.0,
+    "reasons": {},
+    "void": false
+   }
+  },
+  {
+   "name": "recorded line refund plus an unallocated rest",
+   "lines": [
+    {
+     "total": 100000,
+     "refund": 50000
+    },
+    {
+     "total": 200000,
+     "refund": 0
+    },
+    {
+     "total": 300000,
+     "refund": 0
+    }
+   ],
+   "refund_total": 110000,
+   "refund_shipping": 0,
+   "refund_tax": 0,
+   "order_total": 600000,
+   "expect": {
+    "lines": [
+     44545.45,
+     178181.82,
+     267272.73
+    ],
+    "net": 490000.0,
+    "gap": 0.0,
+    "reasons": {},
+    "void": false
+   }
+  },
+  {
+   "name": "a line refunded more than it was worth",
+   "lines": [
+    {
+     "total": 100000,
+     "refund": 130000
+    },
+    {
+     "total": 200000,
+     "refund": 0
+    }
+   ],
+   "refund_total": 130000,
+   "refund_shipping": 0,
+   "refund_tax": 0,
+   "order_total": 300000,
+   "expect": {
+    "lines": [
+     0.0,
+     200000.0
+    ],
+    "net": 200000.0,
+    "gap": 30000.0,
+    "reasons": {
+     "line_over_refund": 30000.0
+    },
+    "void": false
+   }
+  },
+  {
+   "name": "refund made of lines, shipping and tax: only the lines count",
+   "lines": [
+    {
+     "total": 100000,
+     "refund": 50000
+    },
+    {
+     "total": 200000,
+     "refund": 0
+    }
+   ],
+   "refund_total": 90000,
+   "refund_shipping": 25000,
+   "refund_tax": 15000,
+   "order_total": 360000,
+   "expect": {
+    "lines": [
+     50000.0,
+     200000.0
+    ],
+    "net": 250000.0,
+    "gap": 0.0,
+    "reasons": {},
+    "void": false
+   }
+  },
+  {
+   "name": "amount-only full refund of an order with shipping: the shipping explains the excess, net 0, void",
+   "lines": [
+    {
+     "total": 300000,
+     "refund": 0
+    }
+   ],
+   "refund_total": 350000,
+   "refund_shipping": 0,
+   "refund_tax": 0,
+   "order_total": 350000,
+   "expect": {
+    "lines": [
+     0.0
+    ],
+    "net": 0.0,
+    "gap": 0.0,
+    "reasons": {},
+    "void": true
+   }
+  },
+  {
+   "name": "refund bigger than the whole order: the excess is unreconciled",
+   "lines": [
+    {
+     "total": 300000,
+     "refund": 0
+    }
+   ],
+   "refund_total": 600000,
+   "refund_shipping": 0,
+   "refund_tax": 0,
+   "order_total": 350000,
+   "expect": {
+    "lines": [
+     0.0
+    ],
+    "net": 0.0,
+    "gap": 250000.0,
+    "reasons": {
+     "exceeds_items": 250000.0
+    },
+    "void": true
+   }
+  },
+  {
+   "name": "recorded components add up to more than the refunded total",
+   "lines": [
+    {
+     "total": 100000,
+     "refund": 70000
+    },
+    {
+     "total": 200000,
+     "refund": 0
+    }
+   ],
+   "refund_total": 80000,
+   "refund_shipping": 40000,
+   "refund_tax": 0,
+   "order_total": 300000,
+   "expect": {
+    "lines": [
+     30000.0,
+     200000.0
+    ],
+    "net": 230000.0,
+    "gap": 30000.0,
+    "reasons": {
+     "components_exceed_total": 30000.0
+    },
+    "void": false
+   }
+  },
+  {
+   "name": "rounding: 100 split over three equal lines, the first line takes the odd cent",
+   "lines": [
+    {
+     "total": 100.0,
+     "refund": 0
+    },
+    {
+     "total": 100.0,
+     "refund": 0
+    },
+    {
+     "total": 100.0,
+     "refund": 0
+    }
+   ],
+   "refund_total": 100.0,
+   "refund_shipping": 0,
+   "refund_tax": 0,
+   "order_total": 300.0,
+   "expect": {
+    "lines": [
+     66.66,
+     66.67,
+     66.67
+    ],
+    "net": 200.0,
+    "gap": 0.0,
+    "reasons": {},
+    "void": false
+   }
+  },
+  {
+   "name": "cents: 10.55 + 20.45 with 3.00 refunded by amount",
+   "lines": [
+    {
+     "total": 10.55,
+     "refund": 0
+    },
+    {
+     "total": 20.45,
+     "refund": 0
+    }
+   ],
+   "refund_total": 3.0,
+   "refund_shipping": 0,
+   "refund_tax": 0,
+   "order_total": 31.0,
+   "expect": {
+    "lines": [
+     9.53,
+     18.47
+    ],
+    "net": 28.0,
+    "gap": 0.0,
+    "reasons": {},
+    "void": false
+   }
+  },
+  {
+   "name": "nothing refunded",
+   "lines": [
+    {
+     "total": 100000,
+     "refund": 0
+    },
+    {
+     "total": 50000,
+     "refund": 0
+    }
+   ],
+   "refund_total": 0,
+   "refund_shipping": 0,
+   "refund_tax": 0,
+   "order_total": 150000,
+   "expect": {
+    "lines": [
+     100000.0,
+     50000.0
+    ],
+    "net": 150000.0,
+    "gap": 0.0,
+    "reasons": {},
+    "void": false
+   }
+  },
+  {
+   "name": "a free order (all lines worth 0)",
+   "lines": [
+    {
+     "total": 0,
+     "refund": 0
+    }
+   ],
+   "refund_total": 0,
+   "refund_shipping": 0,
+   "refund_tax": 0,
+   "order_total": 0,
+   "expect": {
+    "lines": [
+     0.0
+    ],
+    "net": 0.0,
+    "gap": 0.0,
+    "reasons": {},
+    "void": true
+   }
+  },
+  {
+   "name": "an order with no product lines at all",
+   "lines": [],
+   "refund_total": 0,
+   "refund_shipping": 0,
+   "refund_tax": 0,
+   "order_total": 20000,
+   "expect": {
+    "lines": [],
+    "net": 0.0,
+    "gap": 0.0,
+    "reasons": {},
+    "void": true
+   }
+  },
+  {
+   "name": "a refund on an order with no lines is entirely unreconciled",
+   "lines": [],
+   "refund_total": 5000,
+   "refund_shipping": 0,
+   "refund_tax": 0,
+   "order_total": 20000,
+   "expect": {
+    "lines": [],
+    "net": 0.0,
+    "gap": 0.0,
+    "reasons": {},
+    "void": true
+   }
+  },
+  {
+   "name": "refund exactly equal to the lines, order has tax: void, no gap",
+   "lines": [
+    {
+     "total": 100000,
+     "refund": 0
+    },
+    {
+     "total": 100000,
+     "refund": 0
+    }
+   ],
+   "refund_total": 200000,
+   "refund_shipping": 0,
+   "refund_tax": 0,
+   "order_total": 218000,
+   "expect": {
+    "lines": [
+     0.0,
+     0.0
+    ],
+    "net": 0.0,
+    "gap": 0.0,
+    "reasons": {},
+    "void": true
+   }
+  },
+  {
+   "name": "a zero-value line next to a real one",
+   "lines": [
+    {
+     "total": 0,
+     "refund": 0
+    },
+    {
+     "total": 100000,
+     "refund": 0
+    }
+   ],
+   "refund_total": 25000,
+   "refund_shipping": 0,
+   "refund_tax": 0,
+   "order_total": 100000,
+   "expect": {
+    "lines": [
+     0.0,
+     75000.0
+    ],
+    "net": 75000.0,
+    "gap": 0.0,
+    "reasons": {},
+    "void": false
+   }
+  }
+ ]
+}

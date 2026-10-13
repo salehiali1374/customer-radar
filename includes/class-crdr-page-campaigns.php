@@ -17,6 +17,7 @@ class CRDR_Page_Campaigns {
 		if ( ! empty( $_GET['saved'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification
 			CRDR_UI::notice( 'success', 'کمپین ذخیره شد.' );
 		}
+		CRDR_UI::sync_banner();
 		if ( ! empty( $_GET['retried'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification
 			CRDR_UI::notice( 'success', 'شماره‌های ردشده‌ی این کمپین در اجرای بعدی دوباره امتحان می‌شوند.' );
 		}
@@ -50,11 +51,11 @@ class CRDR_Page_Campaigns {
 			echo '<ul class="crdr-facts">';
 			echo '<li>مخاطب فعلی: <strong>' . esc_html( CRDR_UI::num( $sum['n'] ) ) . ' نفر</strong>' . ( $sum['n'] ? ' (میانگین سبد ' . esc_html( CRDR_UI::money( $sum['aov'] ) ) . ')' : '' ) . '</li>';
 			echo '<li>پیشنهاد: ' . ( 'percent' === $pb['offer']['type'] ? esc_html( CRDR_UI::num( $pb['offer']['percent'] ) ) . '٪ تخفیف، ' . esc_html( CRDR_UI::num( $pb['offer']['days'] ) ) . ' روزه' : 'بدون تخفیف' ) . '</li>';
-			echo '<li>امروز در سقف حساب شده (پذیرفته‌شده توسط سرویس پیامک، در حال ارسال یا با نتیجه‌ی نامشخص): ' . esc_html( CRDR_UI::num( CRDR_Playbooks::sent_today( $id ) ) ) . ' از سقف ' . esc_html( CRDR_UI::num( $pb['daily_cap'] ) ) . ' · گروه شاهد: ' . esc_html( CRDR_UI::num( $pb['holdout_pct'] ) ) . '٪</li>';
+			echo '<li>امروز در سقف حساب شده (پذیرفته‌شده توسط سرویس پیامک، در حال ارسال یا با نتیجه‌ی نامشخص): ' . esc_html( CRDR_Playbooks::CAP_UNKNOWN === CRDR_Playbooks::sent_today( $id ) ? 'نامشخص (خطای پایگاه‌داده)' : CRDR_UI::num( CRDR_Playbooks::sent_today( $id ) ) ) . ' از سقف ' . esc_html( CRDR_UI::num( $pb['daily_cap'] ) ) . ' · گروه شاهد: ' . esc_html( CRDR_UI::num( $pb['holdout_pct'] ) ) . '٪</li>';
 			if ( $res && ( $res['treated']['n'] + $res['holdout']['n'] ) > 0 ) {
 				$tr = $res['treated']['n'] ? $res['treated']['conv'] / $res['treated']['n'] : 0;
 				$ho = $res['holdout']['n'] ? $res['holdout']['conv'] / $res['holdout']['n'] : 0;
-				echo '<li>نتیجه تا امروز: کسانی که پیامکشان پذیرفته شد ' . esc_html( CRDR_UI::pct( $tr, 1 ) ) . ' خرید مجدد، گروه شاهد ' . esc_html( CRDR_UI::pct( $ho, 1 ) ) . '</li>';
+				echo '<li>نتیجه تا امروز: مشتریان انتخاب‌شده برای پیام ' . esc_html( CRDR_UI::pct( $tr, 1 ) ) . ' خرید مجدد، گروه شاهد ' . esc_html( CRDR_UI::pct( $ho, 1 ) ) . '</li>';
 			}
 			echo CRDR_Health::card_item( $id, $pb ); // phpcs:ignore WordPress.Security.EscapeOutput -- escaped inside
 			$aside = CRDR_Playbooks::set_aside( $id );
@@ -117,7 +118,7 @@ class CRDR_Page_Campaigns {
 		foreach ( array( 'off' => 'غیرفعال', 'manual' => 'دستی', 'auto' => 'خودکار (هر ساعت، در ساعت‌های مجاز)' ) as $k => $label ) {
 			echo '<option value="' . esc_attr( $k ) . '"' . selected( $pb['mode'], $k, false ) . '>' . esc_html( $label ) . '</option>';
 		}
-		echo '</select></td></tr></tbody></table>';
+		echo '</select><p class="description">' . esc_html( '«غیرفعال»: هیچ پیامکی نمی‌رود. «دستی»: فقط وقتی خودتان در صفحه‌ی کمپین‌ها «پیش‌نمایش و اجرا» را بزنید. «خودکار»: خود افزونه هر ساعت، فقط در ساعت‌های مجاز تنظیمات و تا سقف روزانه، پیامک واقعی به مشتریان می‌فرستد. پیش از «خودکار» حتماً یک‌بار پیش‌نمایش را ببینید.' ) . '</p></td></tr></tbody></table>';
 
 		echo '<h3>مخاطب: چه کسانی پیام بگیرند؟</h3><div class="crdr-chips">';
 		$sel = isset( $a['segments'] ) ? (array) $a['segments'] : array();
@@ -136,17 +137,17 @@ class CRDR_Page_Campaigns {
 		}
 		echo '</div><p class="description">تأخیر نسبی ۱ یعنی مشتری دقیقاً به موعد معمول خرید خودش رسیده؛ ۱٫۶ یعنی ۶۰٪ دیرتر از معمول.</p>';
 
-		echo '<h3>پیشنهاد</h3><table class="form-table"><tbody><tr><th>نوع</th><td><select name="offer_type"><option value="none"' . selected( $pb['offer']['type'], 'none', false ) . '>بدون تخفیف</option><option value="percent"' . selected( $pb['offer']['type'], 'percent', false ) . '>کد تخفیف درصدی اختصاصی (یک‌بارمصرف)</option></select></td></tr>';
+		echo '<h3>پیشنهاد</h3><p class="description">' . esc_html( 'اگر «کد تخفیف» را انتخاب کنید، برای هر مشتری که پیامک می‌گیرد یک کد واقعی و یک‌بارمصرف در ووکامرس ساخته می‌شود.' ) . '</p><table class="form-table"><tbody><tr><th>نوع</th><td><select name="offer_type"><option value="none"' . selected( $pb['offer']['type'], 'none', false ) . '>بدون تخفیف</option><option value="percent"' . selected( $pb['offer']['type'], 'percent', false ) . '>کد تخفیف درصدی اختصاصی (یک‌بارمصرف)</option></select></td></tr>';
 		echo '<tr><th>درصد تخفیف</th><td><input type="number" min="1" max="90" name="offer_percent" value="' . esc_attr( $pb['offer']['percent'] ?: 10 ) . '"></td></tr>';
 		echo '<tr><th>اعتبار کد (روز)</th><td><input type="number" min="1" max="90" name="offer_days" value="' . esc_attr( $pb['offer']['days'] ?: 7 ) . '"></td></tr></tbody></table>';
 
 		echo '<h3>متن پیامک</h3><textarea name="template" rows="4" class="large-text">' . esc_textarea( $pb['template'] ) . '</textarea>';
-		echo '<p class="description">متغیرها: <code>{name}</code> <code>{store}</code> <code>{coupon}</code> <code>{discount}</code> <code>{expire}</code> <code>{product}</code> <code>{bought}</code> <code>{url}</code> <code>{optout}</code>. متن «لغو۱۱» را برای رعایت قوانین پیامک تبلیغاتی نگه دارید.</p>';
+		CRDR_UI::variable_help( array( 'name', 'store', 'coupon', 'discount', 'expire', 'product', 'bought', 'url', 'optout' ), '{coupon} {discount} {expire} فقط وقتی «پیشنهاد» روی «کد تخفیف» باشد و {product} {bought} {url} فقط در کمپین محصول مکمل کار می‌کنند؛ در غیر این صورت متن ذخیره نمی‌شود. عبارت لغو عضویت ({optout}) را نگه دارید؛ بدون آن پیامک تبلیغاتی ارسال نمی‌شود.' );
 
 		echo '<h3>محدودیت‌ها و اندازه‌گیری</h3><table class="form-table"><tbody>';
-		echo '<tr><th>سقف ارسال در روز</th><td><input type="number" min="1" max="500" name="daily_cap" value="' . esc_attr( $pb['daily_cap'] ) . '"></td></tr>';
+		echo '<tr><th>سقف ارسال در روز</th><td><input type="number" min="1" max="500" name="daily_cap" value="' . esc_attr( $pb['daily_cap'] ) . '"><p class="description">حداکثر چند پیامک در هر روز برای این کمپین. پیامک‌های «پذیرفته‌شده» و «نتیجه‌نامشخص» هر دو از این سقف کم می‌شوند.</p></td></tr>';
 		echo '<tr><th>گروه شاهد (٪ مخاطبان که عمداً پیام نمی‌گیرند)</th><td><input type="number" min="0" max="50" name="holdout_pct" value="' . esc_attr( $pb['holdout_pct'] ) . '"><p class="description">برای اندازه‌گیری اثر واقعی لازم است. مقدار ۱۰ تا ۲۰ پیشنهاد می‌شود.</p></td></tr>';
-		echo '<tr><th>بازه‌ی سنجش خرید (روز)</th><td><input type="number" min="3" max="90" name="window_days" value="' . esc_attr( $pb['window_days'] ) . '"></td></tr>';
+		echo '<tr><th>بازه‌ی سنجش خرید (روز)</th><td><input type="number" min="3" max="90" name="window_days" value="' . esc_attr( $pb['window_days'] ) . '"><p class="description">بعد از پیام، تا چند روز خریدِ مشتری را به حساب این کمپین بگذاریم. مثال: ۱۴ یعنی خریدهای ۱۴ روز بعد از پیام.</p></td></tr>';
 		echo '<tr><th>فاصله‌ی حداقلی تا پیام بعدی به همان مشتری (روز)</th><td><input type="number" min="0" max="365" name="cooldown" value="' . esc_attr( isset( $pb['cooldown'] ) ? $pb['cooldown'] : '' ) . '" placeholder="پیش‌فرض تنظیمات"></td></tr>';
 		echo '</tbody></table>';
 		submit_button( 'ذخیره کمپین' );
@@ -167,6 +168,7 @@ class CRDR_Page_Campaigns {
 		global $wpdb;
 		$pb = CRDR_Playbooks::get( $id );
 		CRDR_UI::open( 'نتایج کمپین', 'customer-radar-campaigns' );
+		CRDR_UI::sync_banner(); // conversions are counted from the order table, which a rebuild empties first
 		if ( ! $pb ) {
 			CRDR_UI::empty_state( 'کمپین پیدا نشد.', 'بازگشت', admin_url( 'admin.php?page=customer-radar-campaigns' ) );
 			CRDR_UI::close();
@@ -192,10 +194,11 @@ class CRDR_Page_Campaigns {
 			return $g['n'] ? $g['rev'] / $g['n'] : 0;
 		};
 		echo '<div class="crdr-card"><div class="crdr-scroll"><table class="widefat striped crdr-table"><thead><tr><th>گروه</th><th>تعداد</th><th>خرید مجدد</th><th>نرخ</th><th>فروش بعد از پیام</th><th>فروش به‌ازای هر نفر</th></tr></thead><tbody>';
-		foreach ( array( 'treated' => array( 'پیامکشان پذیرفته شد', $t ), 'holdout' => array( 'گروه شاهد (پیامی برایشان نرفت)', $h ) ) as $row ) {
+		foreach ( array( 'treated' => array( 'انتخاب‌شده برای دریافت پیام (همه‌ی آن‌ها؛ حتی اگر پیامکشان نرسید)', $t ), 'holdout' => array( 'گروه شاهد (پیامی برایشان نرفت)', $h ), 'accepted' => array( 'زیرمجموعه‌ی گروه اول: پیامکشان توسط سرویس پیامک پذیرفته شد (نتیجه‌ی ثانویه)', $r['accepted'] ) ) as $row ) {
 			echo '<tr><td>' . esc_html( $row[0] ) . '</td><td>' . esc_html( CRDR_UI::num( $row[1]['n'] ) ) . '</td><td>' . esc_html( CRDR_UI::num( $row[1]['conv'] ) ) . '</td><td><strong>' . esc_html( CRDR_UI::pct( $rate( $row[1] ), 1 ) ) . '</strong></td><td>' . esc_html( CRDR_UI::money( $row[1]['rev'] ) ) . '</td><td>' . esc_html( CRDR_UI::money( $rpc( $row[1] ) ) ) . '</td></tr>';
 		}
 		echo '</tbody></table></div>';
+		echo '<p class="crdr-muted">' . esc_html( 'هر مشتری یک‌بار شمرده می‌شود، در گروهی که اولین بار در این کمپین به آن سپرده شد (حتی اگر بعدها پیام دیگری گرفته یا در ماه بعد گروهش عوض شده باشد). سنجش از زمان همان انتساب شروع می‌شود. مقایسه‌ی اصلی «انتخاب‌شده برای پیام» با «گروه شاهد» است، چون هر دو گروه به یک شکل و تصادفی ساخته شده‌اند؛ سطر سوم فقط نشان می‌دهد پیامی که واقعاً پذیرفته شد چقدر اثر داشته و شماره‌های نامعتبر را فقط از یک طرف حذف می‌کند، پس کنار مقایسه‌ی اصلی خوانده شود.' ) . '</p>';
 
 		$x = $r['test'];
 		echo '<h3>اثر واقعی پیام</h3>';
@@ -209,10 +212,14 @@ class CRDR_Page_Campaigns {
 				$extra = ( $rpc( $t ) - $rpc( $h ) ) * $t['n'];
 				echo '<p>فروش اضافه‌ی تقریبی نسبت به حالت بدون پیام: <strong>' . esc_html( CRDR_UI::money( $extra ) ) . '</strong> (' . esc_html( CRDR_UI::num( $r['sent_total'] ) ) . ' پیامک پذیرفته‌شده توسط سرویس پیامک در کل).</p>';
 			} elseif ( $x['p'] < 0.05 && $x['diff'] < 0 ) {
-				echo '<p class="crdr-bad">نتیجه: گروهی که پیامکشان پذیرفته شد کمتر از گروه شاهد خرید کرده است. متن یا زمان‌بندی را بازبینی کنید.</p>';
+				echo '<p class="crdr-bad">نتیجه: گروه انتخاب‌شده برای پیام کمتر از گروه شاهد خرید کرده است. متن یا زمان‌بندی را بازبینی کنید.</p>';
 			} else {
 				echo '<p>نتیجه: تفاوت معناداری دیده نشد؛ ممکن است اثر پیام کوچک باشد یا مشتریان خودشان برمی‌گشتند. قبل از افزایش بودجه، متن یا پیشنهاد را عوض و دوباره آزمایش کنید.</p>';
 			}
+		}
+		$xa = $r['test_accepted'];
+		if ( $r['accepted']['n'] > 0 ) {
+			echo '<p class="crdr-muted">' . esc_html( 'نتیجه‌ی ثانویه (فقط مشتریانی که پیامکشان پذیرفته شد، در برابر همان گروه شاهد): ' . ( $xa['enough'] ? 'تفاوت نرخ خرید مجدد ' . CRDR_UI::pct( $xa['diff'], 1 ) . ' نقطه‌ی درصد.' : 'نمونه هنوز کافی نیست.' ) ) . '</p>';
 		}
 		if ( $r['codes'] > 0 ) {
 			echo '<p>کدهای تخفیف: ' . esc_html( CRDR_UI::num( $r['codes'] ) ) . ' کد ساخته شد، ' . esc_html( CRDR_UI::num( $r['redeemed'] ) ) . ' کد استفاده شد (' . esc_html( CRDR_UI::pct( $r['redeemed'] / max( 1, $r['codes'] ), 1 ) ) . ').</p>';

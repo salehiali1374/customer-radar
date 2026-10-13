@@ -51,10 +51,17 @@ class CRDR_Stats {
 	 * after $d days, the share that re-ordered within the next $window days.
 	 * Uses the empirical distribution of gaps between consecutive orders.
 	 *
-	 * @param float[] $gaps   days between consecutive orders (all customers)
+	 * Customers who ordered once and never came back have no gap, so $gaps alone describes only the people who DID return, and the
+	 * curve then says "almost everybody comes back" (at 180 days it read 100% in the audit scenario, the truth was 33%). $open_ages
+	 * are their open intervals: days since their only order. Such an interval is at risk at $d when it is longer than $d, and it is
+	 * a non-return only if it has been watched for the whole window ($d + $window days): a customer who ordered 10 days ago has not
+	 * "failed to return within 30 days" yet, so they are left out of that point rather than counted as a miss.
+	 *
+	 * @param float[] $gaps      days between consecutive orders (all customers)
+	 * @param float[] $open_ages days since the only order of each customer who has not ordered again (open intervals)
 	 * @return array [ probability|null, sample_size ]
 	 */
-	public static function reorder_prob( array $gaps, $d, $window ) {
+	public static function reorder_prob( array $gaps, $d, $window, array $open_ages = array() ) {
 		$open = 0;
 		$hit  = 0;
 		foreach ( $gaps as $g ) {
@@ -65,14 +72,19 @@ class CRDR_Stats {
 				}
 			}
 		}
+		foreach ( $open_ages as $age ) {
+			if ( $age >= $d + $window ) { // watched long enough to know that nothing happened
+				$open++;
+			}
+		}
 		return array( $open > 0 ? $hit / $open : null, $open );
 	}
 
 	/** Table of reorder_prob for d = 0, step, 2*step ... */
-	public static function survival_table( array $gaps, $step = 15, $max = 240, $window = 30 ) {
+	public static function survival_table( array $gaps, $step = 15, $max = 240, $window = 30, array $open_ages = array() ) {
 		$out = array();
 		for ( $d = 0; $d <= $max; $d += $step ) {
-			list( $p, $n ) = self::reorder_prob( $gaps, $d, $window );
+			list( $p, $n ) = self::reorder_prob( $gaps, $d, $window, $open_ages );
 			$out[]         = array( 'd' => $d, 'p' => $p, 'n' => $n );
 		}
 		return $out;
@@ -99,9 +111,12 @@ class CRDR_Stats {
 	 * @param array $baskets  list of arrays of product ids (one array per order)
 	 * @param int   $min_support minimum number of orders that contain both products
 	 * @param int   $max_basket  baskets larger than this (unique products) are skipped for pairs
+	 * @param int   $all_orders  the number of ALL orders of the store. Lift compares "bought together" with "bought together by chance",
+	 *                           and chance depends on how many orders there are in all, not on how many happen to contain a product that
+	 *                           made the list: dividing by the smaller number inflated or deflated every lift. 0 = use the baskets given.
 	 * @return array each: a, b, support, conf_ab, conf_ba, lift  (sorted by lift*support desc)
 	 */
-	public static function affinity( array $baskets, $min_support = 3, $max_basket = 12 ) {
+	public static function affinity( array $baskets, $min_support = 3, $max_basket = 12, $all_orders = 0 ) {
 		$n      = 0;
 		$single = array();
 		$pair   = array();
@@ -126,7 +141,8 @@ class CRDR_Stats {
 				}
 			}
 		}
-		$out = array();
+		$total = max( $n, (int) $all_orders );
+		$out   = array();
 		foreach ( $pair as $k => $s ) {
 			if ( $s < $min_support ) {
 				continue;
@@ -138,7 +154,7 @@ class CRDR_Stats {
 				'support' => $s,
 				'conf_ab' => $s / $single[ $a ],
 				'conf_ba' => $s / $single[ $b ],
-				'lift'    => ( $s / $n ) / ( ( $single[ $a ] / $n ) * ( $single[ $b ] / $n ) ),
+				'lift'    => ( $s / $total ) / ( ( $single[ $a ] / $total ) * ( $single[ $b ] / $total ) ),
 			);
 		}
 		usort( $out, function ( $x, $y ) {

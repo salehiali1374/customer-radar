@@ -2,10 +2,10 @@
 /**
  * Plugin Name:       رادار مشتری | Customer Radar
  * Description:       تحلیل RFM مشتریان ووکامرس، بخش‌بندی خودکار و «فهرست تماس امروز» برای بازگرداندن مشتریان قدیمی، با ارسال پیامک و کد تخفیف اختصاصی.
- * Version:           1.0.0
+ * Version:           1.0.2
  * Requires at least: 6.0
  * Requires PHP:      7.4
- * Author:            YOUR_NAME
+ * Author:            salehiali1374
  * License:           GPL-2.0-or-later
  * License URI:       https://www.gnu.org/licenses/gpl-2.0.html
  * Text Domain:       customer-radar
@@ -14,15 +14,15 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'CRDR_VERSION', '1.0.0' );
+define( 'CRDR_VERSION', '1.0.2' );
 define( 'CRDR_FILE', __FILE__ );
 define( 'CRDR_DIR', plugin_dir_path( __FILE__ ) );
 define( 'CRDR_URL', plugin_dir_url( __FILE__ ) );
 
 foreach ( array(
-	'jalali', 'rfm', 'stats', 'template', 'send-rules', 'db', 'settings', 'analytics', 'audience', 'sms', 'send', 'health', 'sync', 'recommend',
-	'playbooks', 'insights', 'actions', 'ui',
-	'page-dashboard', 'page-growth', 'page-campaigns', 'page-customers', 'page-products', 'page-settings', 'admin',
+	'jalali', 'identity', 'sales', 'rfm', 'stats', 'template', 'send-rules', 'db', 'retention', 'site', 'uninstall', 'settings', 'analytics', 'audience', 'sms', 'send', 'health', 'sync', 'recommend',
+	'playbooks', 'insights', 'actions', 'privacy', 'ui',
+	'page-dashboard', 'page-growth', 'page-campaigns', 'page-customers', 'page-products', 'page-settings', 'page-guide', 'admin',
 ) as $crdr_file ) {
 	require_once CRDR_DIR . 'includes/class-crdr-' . $crdr_file . '.php';
 }
@@ -51,5 +51,7 @@ add_action( 'plugins_loaded', function () {
 	CRDR_Sync::init();
 	CRDR_Playbooks::init();
 	CRDR_Actions::init();
+	CRDR_Privacy::init();
+	CRDR_Site::init();
 	CRDR_Admin::init();
 } );

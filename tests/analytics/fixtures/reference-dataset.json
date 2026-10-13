@@ -1,0 +1,373 @@
+{
+ "asof": 1791621000,
+ "orders": [
+  {
+   "id": 1,
+   "status": "completed",
+   "local": "2026-06-05 11:00:00",
+   "ts": 1780644600,
+   "uid": 101,
+   "phone": "0912 000 0001",
+   "email": "u1@example.test",
+   "items": [
+    [
+     1,
+     800000
+    ],
+    [
+     2,
+     200000
+    ]
+   ],
+   "shipping": 0,
+   "tax": 0,
+   "total": 1000000,
+   "refunded": 0,
+   "note": "registered repeat buyer, order 1"
+  },
+  {
+   "id": 2,
+   "status": "completed",
+   "local": "2026-07-20 15:00:00",
+   "ts": 1784547000,
+   "uid": 101,
+   "phone": "09120000001",
+   "email": "u1@example.test",
+   "items": [
+    [
+     1,
+     500000
+    ]
+   ],
+   "shipping": 50000,
+   "tax": 45000,
+   "total": 595000,
+   "refunded": 0,
+   "note": "same buyer; order WITH shipping and tax"
+  },
+  {
+   "id": 3,
+   "status": "processing",
+   "local": "2026-09-22 23:59:59",
+   "ts": 1790108999,
+   "uid": 101,
+   "phone": "+98 912 000 0001",
+   "email": "u1@example.test",
+   "items": [
+    [
+     3,
+     300000
+    ]
+   ],
+   "shipping": 0,
+   "tax": 27000,
+   "total": 327000,
+   "refunded": 0,
+   "note": "same buyer; last second of Shahrivar 1405 (period boundary)"
+  },
+  {
+   "id": 4,
+   "status": "completed",
+   "local": "2026-09-23 00:00:00",
+   "ts": 1790109000,
+   "uid": 0,
+   "phone": "09350000002",
+   "email": "g1@example.test",
+   "items": [
+    [
+     2,
+     400000
+    ],
+    [
+     3,
+     100000
+    ]
+   ],
+   "shipping": 40000,
+   "tax": 0,
+   "total": 540000,
+   "refunded": 0,
+   "note": "guest, shipping; first second of Mehr 1405 (period boundary)"
+  },
+  {
+   "id": 5,
+   "status": "completed",
+   "local": "2026-08-01 12:00:00",
+   "ts": 1785573000,
+   "uid": 102,
+   "phone": "09120000002",
+   "email": "u2@example.test",
+   "items": [
+    [
+     1,
+     1000000
+    ]
+   ],
+   "shipping": 0,
+   "tax": 0,
+   "total": 1000000,
+   "refunded": 400000,
+   "note": "registered, PARTIALLY refunded (400,000)"
+  },
+  {
+   "id": 6,
+   "status": "refunded",
+   "local": "2026-08-15 12:00:00",
+   "ts": 1786782600,
+   "uid": 0,
+   "phone": "09120000003",
+   "email": "u3@example.test",
+   "items": [
+    [
+     1,
+     700000
+    ]
+   ],
+   "shipping": 0,
+   "tax": 0,
+   "total": 700000,
+   "refunded": 700000,
+   "note": "FULLY refunded, status refunded"
+  },
+  {
+   "id": 7,
+   "status": "on-hold",
+   "local": "2026-09-01 10:00:00",
+   "ts": 1788244200,
+   "uid": 0,
+   "phone": "09120000004",
+   "email": "u4@example.test",
+   "items": [
+    [
+     2,
+     250000
+    ]
+   ],
+   "shipping": 0,
+   "tax": 0,
+   "total": 250000,
+   "refunded": 0,
+   "note": "on-hold"
+  },
+  {
+   "id": 8,
+   "status": "cancelled",
+   "local": "2026-09-02 10:00:00",
+   "ts": 1788330600,
+   "uid": 0,
+   "phone": "09120000004",
+   "email": "u4@example.test",
+   "items": [
+    [
+     3,
+     300000
+    ]
+   ],
+   "shipping": 0,
+   "tax": 0,
+   "total": 300000,
+   "refunded": 0,
+   "note": "cancelled"
+  },
+  {
+   "id": 9,
+   "status": "failed",
+   "local": "2026-09-03 10:00:00",
+   "ts": 1788417000,
+   "uid": 0,
+   "phone": "09120000004",
+   "email": "u4@example.test",
+   "items": [
+    [
+     1,
+     150000
+    ]
+   ],
+   "shipping": 0,
+   "tax": 0,
+   "total": 150000,
+   "refunded": 0,
+   "note": "failed"
+  },
+  {
+   "id": 10,
+   "status": "pending",
+   "local": "2026-09-04 10:00:00",
+   "ts": 1788503400,
+   "uid": 0,
+   "phone": "09120000004",
+   "email": "u4@example.test",
+   "items": [
+    [
+     2,
+     100000
+    ]
+   ],
+   "shipping": 0,
+   "tax": 0,
+   "total": 100000,
+   "refunded": 0,
+   "note": "pending payment"
+  },
+  {
+   "id": 11,
+   "status": "completed",
+   "local": "2026-04-01 10:00:00",
+   "ts": 1775025000,
+   "uid": 0,
+   "phone": "0912-345-6789",
+   "email": "g2@example.test",
+   "items": [
+    [
+     2,
+     300000
+    ]
+   ],
+   "shipping": 0,
+   "tax": 0,
+   "total": 300000,
+   "refunded": 0,
+   "note": "guest G2, phone with dashes"
+  },
+  {
+   "id": 12,
+   "status": "completed",
+   "local": "2026-08-30 10:00:00",
+   "ts": 1788071400,
+   "uid": 0,
+   "phone": "",
+   "email": "G2@Example.test",
+   "items": [
+    [
+     3,
+     200000
+    ]
+   ],
+   "shipping": 0,
+   "tax": 0,
+   "total": 200000,
+   "refunded": 0,
+   "note": "SAME person G2, phone left empty (email only)"
+  },
+  {
+   "id": 13,
+   "status": "processing",
+   "local": "2026-10-01 10:00:00",
+   "ts": 1790836200,
+   "uid": 0,
+   "phone": "09351234567",
+   "email": "g2@example.test",
+   "items": [
+    [
+     1,
+     250000
+    ]
+   ],
+   "shipping": 0,
+   "tax": 0,
+   "total": 250000,
+   "refunded": 0,
+   "note": "SAME person G2, NEW phone number"
+  },
+  {
+   "id": 14,
+   "status": "completed",
+   "local": "2026-03-10 09:00:00",
+   "ts": 1773120600,
+   "uid": 0,
+   "phone": "00000000000",
+   "email": "deleted@site.invalid",
+   "items": [
+    [
+     2,
+     120000
+    ]
+   ],
+   "shipping": 0,
+   "tax": 0,
+   "total": 120000,
+   "refunded": 0,
+   "note": "personal data ERASED by WooCommerce privacy tool"
+  },
+  {
+   "id": 15,
+   "status": "completed",
+   "local": "2026-05-12 09:00:00",
+   "ts": 1778563800,
+   "uid": 0,
+   "phone": "00000000000",
+   "email": "deleted@site.invalid",
+   "items": [
+    [
+     3,
+     130000
+    ]
+   ],
+   "shipping": 0,
+   "tax": 0,
+   "total": 130000,
+   "refunded": 0,
+   "note": "ANOTHER erased order (a different, unknown person)"
+  },
+  {
+   "id": 16,
+   "status": "completed",
+   "local": "2026-03-01 14:00:00",
+   "ts": 1772361000,
+   "uid": 0,
+   "phone": "09120000005",
+   "email": "u5@example.test",
+   "items": [
+    [
+     1,
+     450000
+    ]
+   ],
+   "shipping": 0,
+   "tax": 0,
+   "total": 450000,
+   "refunded": 0,
+   "note": "single-order buyer, never returned"
+  },
+  {
+   "id": 17,
+   "status": "completed",
+   "local": "2026-09-10 12:00:00",
+   "ts": 1789029000,
+   "uid": 0,
+   "phone": "09120000006",
+   "email": "u6@example.test",
+   "items": [
+    [
+     2,
+     200000
+    ]
+   ],
+   "shipping": 0,
+   "tax": 0,
+   "total": 200000,
+   "refunded": 200000,
+   "note": "FULLY refunded but status still completed (possible via the woocommerce_order_fully_refunded_status filter)"
+  },
+  {
+   "id": 18,
+   "status": "completed",
+   "local": "2026-09-15 10:00:00",
+   "ts": 1789453800,
+   "uid": 0,
+   "phone": "abc",
+   "email": "not-an-email",
+   "items": [
+    [
+     1,
+     100000
+    ]
+   ],
+   "shipping": 0,
+   "tax": 0,
+   "total": 100000,
+   "refunded": 0,
+   "note": "malformed billing data, guest"
+  }
+ ]
+}

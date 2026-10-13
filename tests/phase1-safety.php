@@ -35,7 +35,7 @@ function crdr_t_cfg( array $pb = array(), array $set = array(), array $mock = ar
 	update_option( CRDR_Playbooks::OPTION, array( 'dormant' => array_merge( array(
 		'name' => 'خواب', 'mode' => 'manual', 'holdout_pct' => 0, 'daily_cap' => 100, 'window_days' => 14,
 		'offer' => array( 'type' => 'none', 'percent' => 0, 'days' => 0 ),
-		'template' => 'سلام {name}', 'audience' => array( 'segments' => array( 'hibernating' ) ),
+		'template' => 'سلام {name} {optout}', 'audience' => array( 'segments' => array( 'hibernating' ) ),
 	), $pb ) ) );
 	update_option( 'crdr_t_mock', wp_json_encode( $mock ) );
 }
@@ -97,6 +97,18 @@ function crdr_t_parallel( array $jobs, $lead = 6 ) {
 class CRDR_T_Done extends Exception {}
 function crdr_t_ajax( $callable, array $post, $user = 1 ) {
 	wp_set_current_user( $user );
+	// The one-off handlers now need the identity token the page carries next to the row id (section H tests that rule itself). Tests
+	// that are about something else behave like a fresh page: they send the token of whoever the id points to right now. A test
+	// that wants to send no token, or a wrong one, passes 'k' itself ('k' => null sends none).
+	if ( is_array( $callable ) && in_array( $callable[1], array( 'ajax_contact', 'ajax_preview' ), true ) && isset( $post['id'] ) && ! array_key_exists( 'k', $post ) ) {
+		$row = CRDR_Actions::customer( (int) $post['id'] );
+		if ( $row ) {
+			$post['k'] = CRDR_Actions::identity( $row['ckey'] );
+		}
+	}
+	if ( array_key_exists( 'k', $post ) && null === $post['k'] ) {
+		unset( $post['k'] );
+	}
 	$_POST = $_REQUEST = array_merge( array( 'nonce' => wp_create_nonce( CRDR_Actions::NONCE ) ), $post );
 	add_filter( 'wp_doing_ajax', '__return_true' );
 	$h = function () {
@@ -147,7 +159,11 @@ $cols = $wpdb->get_col( 'SHOW COLUMNS FROM ' . CRDR_DB::contacts(), 0 );
 t( 'new columns exist', ! array_diff( array( 'run_id', 'localid', 'claim_key' ), $cols ), implode( ',', $cols ) );
 $idx = $wpdb->get_results( 'SHOW INDEX FROM ' . CRDR_DB::contacts() . " WHERE Key_name = 'claim_key'", ARRAY_A );
 t( 'claim_key is a UNIQUE index', $idx && 0 === (int) $idx[0]['Non_unique'] );
-t( 'schema version is 4 (3 -> 4 only cleans stored data, no schema change)', '4' === get_option( 'crdr_db_version' ) );
+// PHASE 3A: the schema version is 5 now (4 -> 5 adds uid + email to the order table, see below); 3 -> 4 is still data only.
+// PHASE 4.2: the current schema is 6 (crdr_contacts.orphan_ts, the retention sweep); the assertion is about "current", the number moved.
+t( 'schema version is the current one (6)', '6' === CRDR_DB::DB_VERSION && CRDR_DB::DB_VERSION === get_option( 'crdr_db_version' ) );
+$ocols = $wpdb->get_col( 'SHOW COLUMNS FROM ' . CRDR_DB::orders(), 0 );
+t( 'the order table has the identity evidence columns uid and email', ! array_diff( array( 'uid', 'email' ), $ocols ), implode( ',', $ocols ) );
 
 // Upgrade from the previous schema: old table shape + one legacy row survive and gain the new columns.
 $wpdb->query( 'ALTER TABLE ' . CRDR_DB::contacts() . ' DROP INDEX claim_key, DROP COLUMN claim_key, DROP COLUMN localid, DROP COLUMN run_id' );
@@ -155,6 +171,11 @@ update_option( 'crdr_db_version', '2' );
 $wpdb->query( 'TRUNCATE TABLE ' . CRDR_DB::contacts() );
 $wpdb->query( 'INSERT INTO ' . CRDR_DB::contacts() . " (ckey,kind,playbook,grp,status,created_ts) VALUES ('p:09129999999','sms','legacy','treated','ok'," . time() . ')' );
 CRDR_DB::maybe_upgrade();
+// PHASE 4.1: an update from a schema older than 5 sets the "first rebuild required" flag, which pauses SENDING until a rebuild has finished
+// (tests/release-safety.php tests that window). This suite goes on to send, so the simulated update is "completed" here, after
+// asserting that the update did open the window.
+t( 'an update from schema 2 opens the first-rebuild window', (int) get_option( CRDR_DB::REBUILD_OPTION ) > 0 );
+delete_option( CRDR_DB::REBUILD_OPTION );
 $cols = $wpdb->get_col( 'SHOW COLUMNS FROM ' . CRDR_DB::contacts(), 0 );
 t( 'upgrade from v2 adds the columns', ! array_diff( array( 'run_id', 'localid', 'claim_key' ), $cols ) );
 $legacy = crdr_t_rows( "playbook = 'legacy'" );
@@ -263,7 +284,7 @@ t( 'blank custom campaign template is valid', array() === CRDR_Playbooks::templa
 t( 'default manual-SMS texts are valid', array() === CRDR_Settings::template_errors( CRDR_Settings::defaults() ) );
 
 // a legacy campaign that would have sent the raw "{coupon}" is now stopped before anything is sent
-crdr_t_cfg( array( 'mode' => 'manual', 'template' => 'سلام {name}، کد شما {coupon}' ) );
+crdr_t_cfg( array( 'mode' => 'manual', 'template' => 'سلام {name}، کد شما {coupon} {optout}' ) );
 crdr_t_reset( 6 );
 $r = CRDR_Playbooks::run( 'dormant', 6 );
 t( 'invalid stored template: run refused, nothing sent', 'template' === $r['blocked'] && 0 === $r['sent'] && 0 === count( crdr_t_requests() ) && 0 === crdr_t_count(), wp_json_encode( $r, JSON_UNESCAPED_UNICODE ) );
@@ -274,7 +295,7 @@ t( 'turning an invalid campaign on is refused', is_array( CRDR_Playbooks::set_mo
 t( 'turning it off is always possible', true === CRDR_Playbooks::set_mode( 'dormant', 'off' ) );
 
 // ... and a valid template with an offer gets a real coupon in the text
-crdr_t_cfg( array( 'mode' => 'manual', 'offer' => array( 'type' => 'percent', 'percent' => 10, 'days' => 5 ), 'template' => 'سلام {name}، {discount}٪ تخفیف با کد {coupon} تا {expire}' ) );
+crdr_t_cfg( array( 'mode' => 'manual', 'offer' => array( 'type' => 'percent', 'percent' => 10, 'days' => 5 ), 'template' => 'سلام {name}، {discount}٪ تخفیف با کد {coupon} تا {expire} {optout}' ) );
 crdr_t_reset( 3 );
 $r    = CRDR_Playbooks::run( 'dormant', 3 );
 $reqs = crdr_t_requests();
@@ -294,7 +315,7 @@ t( 'offer campaign: the coupon code is inside the sent text', 3 === count( array
 } ) ) );
 
 // last line of defence: a value that cannot be produced at send time (empty store name) -> nothing is sent
-crdr_t_cfg( array( 'mode' => 'manual', 'template' => 'سلام {name} از {store}' ) );
+crdr_t_cfg( array( 'mode' => 'manual', 'template' => 'سلام {name} از {store} {optout}' ) );
 crdr_t_reset( 6 );
 $blogname = get_option( 'blogname' );
 update_option( 'blogname', '' );
@@ -304,14 +325,14 @@ t( 'unfillable placeholder at send time: nothing sent', 0 === $r['sent'] && 0 ==
 t( 'unfillable placeholder: counted as failed (6 of 6: fewer than 10 in a row, so the run goes on)', 6 === $r['failed'] );
 t( 'unfillable placeholder: rows say nobuild (nothing sent, not a contact) and name the token', 6 === crdr_t_count( "status = 'nobuild' AND error LIKE '%{store}%'" ) && 0 === crdr_t_count( "status = 'failed'" ) );
 t( 'unfillable placeholder: the claim was released (claim_key cleared)', 0 === crdr_t_count( 'claim_key IS NOT NULL' ) );
-crdr_t_cfg( array( 'mode' => 'manual', 'cross_sell' => true, 'template' => 'پیشنهاد {product}' ) );
+crdr_t_cfg( array( 'mode' => 'manual', 'cross_sell' => true, 'template' => 'پیشنهاد {product} {optout}' ) );
 $pbx = CRDR_Playbooks::get( 'dormant' );
 $cu  = CRDR_Actions::customer_by_key( 'p:09120000001' );
 $cmp = CRDR_Playbooks::compose( $pbx, $cu, false, null );
 t( 'compose: missing {product} value -> not ok', false === $cmp[2]['ok'] && array( '{product}' ) === $cmp[2]['missing'] );
 
 // saving
-crdr_t_cfg( array( 'mode' => 'manual', 'template' => 'سلام {name}' ) );
+crdr_t_cfg( array( 'mode' => 'manual', 'template' => 'سلام {name} {optout}' ) );
 $before = get_option( CRDR_Playbooks::OPTION );
 $r      = CRDR_Playbooks::save( 'dormant', array( 'name' => 'خواب', 'mode' => 'auto', 'template' => 'کد {coupon}', 'offer_type' => 'none' ) );
 t( 'save(): unknown/unavailable token -> errors returned', is_array( $r ) && count( $r ) >= 1 && false !== mb_strpos( $r[0], '{coupon}' ) );
@@ -327,12 +348,12 @@ $r = CRDR_Playbooks::save( 'dormant', array( 'name' => 'خواب', 'mode' => 'ma
 t( 'save(): over-long text rejected instead of silently cut', is_array( $r ) );
 $r = CRDR_Playbooks::save( 'dormant', array( 'name' => 'خواب', 'mode' => 'manual', 'template' => 'سلام {name} از {store} {optout}', 'offer_type' => 'none', 'daily_cap' => 10 ) );
 t( 'save(): a valid template is stored', true === $r && 'سلام {name} از {store} {optout}' === get_option( CRDR_Playbooks::OPTION )['dormant']['template'] );
-$r = CRDR_Playbooks::save( 'dormant', array( 'name' => 'خواب', 'mode' => 'manual', 'template' => 'کد {coupon}', 'offer_type' => 'percent', 'offer_percent' => 10, 'offer_days' => 5 ) );
+$r = CRDR_Playbooks::save( 'dormant', array( 'name' => 'خواب', 'mode' => 'manual', 'template' => 'کد {coupon} {optout}', 'offer_type' => 'percent', 'offer_percent' => 10, 'offer_days' => 5 ) );
 t( 'save(): {coupon} is accepted once the offer is a discount code', true === $r );
 t( 'save(): unknown campaign id', false === CRDR_Playbooks::save( 'nope', array() ) );
 
 // settings (manual SMS texts)
-$s = CRDR_Settings::sanitize( array( 'sms_template' => 'سلام {name} کد {coupon}', 'sms_template_coupon' => 'سلام {name}، کد {coupon} تا {expire}' ) );
+$s = CRDR_Settings::sanitize( array( 'sms_template' => 'سلام {name} کد {coupon} {optout}', 'sms_template_coupon' => 'سلام {name}، کد {coupon} تا {expire} {optout}' ) );
 $e = CRDR_Settings::template_errors( $s );
 t( 'settings: {coupon} in the plain text is rejected, in the coupon text it is accepted', 1 === count( $e ) && 0 === mb_strpos( $e[0], 'متن پیامک ساده' ) );
 t( 'settings: sanitize() stores nothing', get_option( CRDR_Settings::OPTION ) !== $s );
@@ -346,7 +367,7 @@ t( 'call list SMS: invalid manual text is refused', false === $j['success'] && f
 t( 'call list SMS: nothing claimed, nothing sent', 0 === crdr_t_count() && 0 === count( crdr_t_requests() ) );
 $j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_preview' ), array( 'id' => $cid, 'coupon' => 0 ) );
 t( 'call list preview: shows the problem instead of a raw {coupon}', false === $j['success'] );
-crdr_t_cfg( array( 'mode' => 'off' ), array( 'sms_template' => 'سلام {name}' ) );
+crdr_t_cfg( array( 'mode' => 'off' ), array( 'sms_template' => 'سلام {name} {optout}' ) );
 $j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ) );
 t( 'call list SMS: valid text is sent', true === $j['success'] && 1 === count( crdr_t_requests() ), wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
 $j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ) );
@@ -369,7 +390,7 @@ $coupons = function () use ( $wpdb ) {
 	return (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type = 'shop_coupon'" );
 };
 $cfg = function ( $from, $to ) {
-	crdr_t_cfg( array( 'mode' => 'off' ), array( 'send_from' => $from, 'send_to' => $to, 'sms_template' => 'سلام {name}', 'sms_template_coupon' => 'سلام {name} کد {coupon} تا {expire}' ) );
+	crdr_t_cfg( array( 'mode' => 'off' ), array( 'send_from' => $from, 'send_to' => $to, 'sms_template' => 'سلام {name} {optout}', 'sms_template_coupon' => 'سلام {name} کد {coupon} تا {expire} {optout}' ) );
 	crdr_t_reset( 3 );
 	return (int) $GLOBALS['wpdb']->get_var( 'SELECT id FROM ' . CRDR_DB::customers() . ' ORDER BY id LIMIT 1' );
 };
@@ -528,7 +549,7 @@ $dump = wp_json_encode( get_option( CRDR_Health::OPTION ) ) . wp_json_encode( ge
 t( 'nothing personal or secret in the recorded state: no key, phone or message text', false === strpos( $dump, 'TESTKEY' ) && false === strpos( $dump, '0912' ) && false === strpos( $dump, 'nmae' ) && false === mb_strpos( $dump, 'سلام' ) );
 
 // --- recovery: fixed template, next tick executes, the block is cleared and the history says so
-crdr_t_cfg( array( 'mode' => 'auto', 'template' => 'سلام {name}' ) );
+crdr_t_cfg( array( 'mode' => 'auto', 'template' => 'سلام {name} {optout}' ) );
 CRDR_Playbooks::hourly();
 $st = $hs();
 t( 'recovery: the run executed and sent', 6 === count( crdr_t_requests() ) && 6 === crdr_t_count( "status = 'ok'" ) );
@@ -722,7 +743,7 @@ add_filter( 'wp_insert_post_empty_content', function ( $empty, $postarr ) {
 	}
 	return $empty;
 }, 10, 2 );
-$offer_cfg = array( 'mode' => 'manual', 'offer' => array( 'type' => 'percent', 'percent' => 10, 'days' => 5 ), 'template' => 'سلام {name}، کد {coupon}' );
+$offer_cfg = array( 'mode' => 'manual', 'offer' => array( 'type' => 'percent', 'percent' => 10, 'days' => 5 ), 'template' => 'سلام {name}، کد {coupon} {optout}' );
 $bad3      = array( 'p:09120000001', 'p:09120000002', 'p:09120000003' ); // the customers at the very top of the audience
 $scenario  = function () use ( $offer_cfg, $bad3 ) {
 	crdr_t_cfg( $offer_cfg );
@@ -777,7 +798,7 @@ $n0 = count( crdr_t_requests() );
 $r  = CRDR_Playbooks::run( 'dormant', 20 );
 t( 'recovery: fixing the cause alone does not hammer them again straight away', 0 === $r['sent'] && $n0 === count( crdr_t_requests() ) );
 // ... saving the campaign lifts it at once
-CRDR_Playbooks::save( 'dormant', array( 'name' => 'خواب', 'mode' => 'manual', 'template' => 'سلام {name}، کد {coupon}', 'offer_type' => 'percent', 'offer_percent' => 10, 'offer_days' => 5, 'daily_cap' => 100 ) );
+CRDR_Playbooks::save( 'dormant', array( 'name' => 'خواب', 'mode' => 'manual', 'template' => 'سلام {name}، کد {coupon} {optout}', 'offer_type' => 'percent', 'offer_percent' => 10, 'offer_days' => 5, 'daily_cap' => 100 ) );
 $r = CRDR_Playbooks::run( 'dormant', 20 );
 t( 'recovery: saving the campaign lifts the set-aside; the three are served exactly once', 3 === $r['sent'] && 0 === count( $nb() ) + crdr_t_count( "status = 'nobuild'" ), wp_json_encode( $r, JSON_UNESCAPED_UNICODE ) );
 // ... as does switching the mode, saving Settings, or simply waiting out the six hours
@@ -809,7 +830,7 @@ t( 'after the wait a still-broken customer is tried once more and fails again...
 t( '... and the table does not grow: still exactly one nobuild row per customer', 3 === count( $nb() ) && 3 === crdr_t_count( "status = 'nobuild' AND created_ts > " . ( time() - 60 ) ) );
 
 // a GLOBAL cause (blank store name): at most ten customers are set aside per run, then it stops; no coupon is wasted
-crdr_t_cfg( array_merge( $offer_cfg, array( 'template' => 'سلام {name} از {store} کد {coupon}' ) ) );
+crdr_t_cfg( array_merge( $offer_cfg, array( 'template' => 'سلام {name} از {store} کد {coupon} {optout}' ) ) );
 crdr_t_reset( 15 );
 $GLOBALS['crdr_t_bad'] = array();
 $coup0    = $coupons();
@@ -828,7 +849,10 @@ t( 'global cause fixed + settings saved: everyone is served once', 15 === $r['se
 crdr_t_cfg( array( 'mode' => 'manual', 'template' => '{optout}' ), array( 'optout_text' => '' ) );
 crdr_t_reset( 4 );
 $r = CRDR_Playbooks::run( 'dormant', 10 );
-t( 'empty text after filling: nothing sent, set aside as nobuild with a Persian reason', 0 === $r['sent'] && 0 === count( crdr_t_requests() ) && 4 === crdr_t_count( "status = 'nobuild' AND error <> ''" ) && 0 === crdr_t_count( "status = 'failed'" ), wp_json_encode( $r, JSON_UNESCAPED_UNICODE ) );
+// PHASE 4.1: an empty opt-out phrase is no longer "a message that renders to nothing" at send time: every promotional text must carry {optout},
+// and an empty phrase is refused up front (before anybody is claimed, so there is nothing to set aside). The safety property this test
+// pinned (nothing is sent) is unchanged; how it is reached changed. The same scenario in tests/release-safety.php, section F.
+t( 'empty text after filling (empty opt-out phrase): nothing sent, nobody claimed, a Persian reason', 0 === $r['sent'] && 0 === count( crdr_t_requests() ) && 'template' === $r['blocked'] && 0 === crdr_t_count( "kind = 'sms'" ) && false !== mb_strpos( $r['error'], 'عبارت لغو عضویت' ), wp_json_encode( $r, JSON_UNESCAPED_UNICODE ) );
 
 // gateway failures are a different thing and keep their rule: failed (retryable), stop after three
 crdr_t_cfg( array( 'mode' => 'manual' ), array(), array( 'mode' => 'connect_fail' ) );
@@ -859,7 +883,7 @@ $st = function ( $status ) {
 	return crdr_t_count( "status = '{$status}'" );
 };
 $save_campaign = function () {
-	CRDR_Playbooks::save( 'dormant', array( 'name' => 'خواب', 'mode' => 'manual', 'template' => 'سلام {name}', 'offer_type' => 'none', 'daily_cap' => 100 ) );
+	CRDR_Playbooks::save( 'dormant', array( 'name' => 'خواب', 'mode' => 'manual', 'template' => 'سلام {name} {optout}', 'offer_type' => 'none', 'daily_cap' => 100 ) );
 };
 $no_pii = function ( $text ) {
 	return false === strpos( $text, '0912' ) && false === strpos( $text, 'TESTKEY' ) && false === strpos( $text, 'ECHO' ) && false === mb_strpos( $text, 'سلام' );
@@ -987,31 +1011,31 @@ $mockset();
 $r = CRDR_Playbooks::run( 'dormant', 8 );
 t( 'broadly broken gateway: back to normal at the next run', 8 === $r['sent'] );
 
-// ---- 6. unclear cause (402): a short, bounded set-aside so later customers still progress ----------------------------------------
-$gw( array( $phone( 1 ) => 'op_failed', $phone( 2 ) => 'op_failed', $phone( 3 ) => 'op_failed' ), 'ok', 10 );
+// ---- 6. unclear cause (402): RELEASE FREEZE - unknown, never retried (a fresh localid would defeat the provider's duplicate check) -----
+$gw( array( $phone( 1 ) => 'op_failed' ), 'ok', 6 );
 $r1 = CRDR_Playbooks::run( 'dormant', 8 );
-t( 'unclear failure (402) x3 at the top: the breaker trips, the three are set aside as "retry"', 3 === $r1['failed'] && 0 === $r1['sent'] && 3 === $st( 'retry' ) && 0 === $st( 'rejected' ), wp_json_encode( $r1, JSON_UNESCAPED_UNICODE ) );
+$u1 = crdr_t_rows( "status = 'unknown'" );
+t( 'unclear failure (402): UNKNOWN, not failed / retry; the run stops at it (one request, nobody after it)', 1 === $r1['unknown'] && 0 === $r1['failed'] && 0 === $r1['sent'] && 1 === count( crdr_t_requests() ) && 1 === count( $u1 ) && 0 === $st( 'retry' ) && 0 === $st( 'failed' ), wp_json_encode( $r1, JSON_UNESCAPED_UNICODE ) );
+t( 'unclear failure: the row keeps the localid that was sent and our own wording with the code (no provider text)', 1 === count( $u1 ) && '' !== $u1[0]['localid'] && false !== strpos( (string) $u1[0]['error'], '402' ) && $no_pii( (string) $u1[0]['error'] ), wp_json_encode( $u1, JSON_UNESCAPED_UNICODE ) );
+t( 'unclear failure: the customer counts as contacted (cooldown) and uses the daily cap, so nobody can send to them again', 'cooldown' === CRDR_DB::blocked_reason( 'p:09120000001' ) && 1 === CRDR_Playbooks::sent_today( 'dormant' ) );
 $r2 = CRDR_Playbooks::run( 'dormant', 8 );
-t( 'unclear failure: the NEXT run goes past them and serves the others (progress is guaranteed)', 7 === $r2['sent'] && 0 === $r2['failed'], wp_json_encode( $r2, JSON_UNESCAPED_UNICODE ) );
-t( 'unclear failure: not contacted, not in cooldown', '' === CRDR_DB::blocked_reason( 'p:09120000002' ) && 7 === crdr_t_count( "status = 'ok'" ) );
+$by = array_count_values( array_column( crdr_t_requests(), 'receptor' ) );
+t( 'unclear failure: the NEXT run carries on with OTHER customers and never asks for the same one again', 5 === $r2['sent'] && 1 === $by['09120000001'] && 6 === count( $by ), wp_json_encode( array( $r2, $by ), JSON_UNESCAPED_UNICODE ) );
 $mockset();
-$r = CRDR_Playbooks::run( 'dormant', 8 );
-t( 'unclear failure: not hammered again right away', 0 === $r['sent'] );
 $save_campaign();
 $r = CRDR_Playbooks::run( 'dormant', 8 );
-t( 'unclear failure: lifted by saving the campaign/settings (the explicit recovery) and served once', 3 === $r['sent'] && 0 === $st( 'retry' ) );
-$gw( array( $phone( 1 ) => 'op_failed' ), 'ok', 4 );
-CRDR_Playbooks::run( 'dormant', 8 );
-$mockset();
-$wpdb->query( 'UPDATE ' . CRDR_DB::contacts() . " SET created_ts = created_ts - 25000 WHERE status = 'retry'" );
+t( 'unclear failure: saving the campaign / settings (the recovery for "set aside" customers) does NOT release it', 0 === $r['sent'] && 1 === $st( 'unknown' ) && 1 === array_count_values( array_column( crdr_t_requests(), 'receptor' ) )['09120000001'] );
+$wpdb->query( 'UPDATE ' . CRDR_DB::contacts() . " SET created_ts = created_ts - 25000 WHERE status = 'unknown'" );
 $r = CRDR_Playbooks::run( 'dormant', 8 );
-t( 'unclear failure: or by waiting out six hours', 1 === $r['sent'] && 0 === $st( 'retry' ) );
+t( 'unclear failure: waiting six hours does not release it either (no automatic retry, so no second SMS with a fresh localid)', 0 === $r['sent'] && 1 === $st( 'unknown' ) && 1 === array_count_values( array_column( crdr_t_requests(), 'receptor' ) )['09120000001'] );
 $gw( array( $phone( 2 ) => 'op_failed' ), 'ok', 5 );
 $r = CRDR_Playbooks::run( 'dormant', 8 );
-t( 'one unclear failure among others does not stop the run', 1 === $r['failed'] && 4 === $r['sent'] );
+t( 'one unclear failure ends the run for that moment (customers 3..5 are served by the next run)', 1 === $r['unknown'] && 0 === $r['failed'] && 1 === $r['sent'] );
 
+// PHASE 4.2: 451 is now a DOCUMENTED code (the provider's current table: too many calls from this IP) and is classified as 'rate' (nothing sent, stop, try
+// again at the next run; tests/release-safety.php section H). The ambiguity this loop pins is about codes the provider does NOT document, so it uses 499.
 // ---- 7. AMBIGUOUS outcomes: never retried, counted as contacted -------------------------------------------------------------------
-foreach ( array( 'timeout' => 'timeout', 'http500' => 'HTTP 500', 'server_busy' => '409 "try later"', 'rate_limit' => '451 (not in the provider table)' ) as $mode => $label ) {
+foreach ( array( 'timeout' => 'timeout', 'http500' => 'HTTP 500', 'server_busy' => '409 "try later"', 'undocumented' => '499 (not in the provider table)' ) as $mode => $label ) {
 	$gw( array( $phone( 1 ) => $mode ), 'ok', 5 );
 	$r = CRDR_Playbooks::run( 'dormant', 8 );
 	t( "ambiguous ({$label}): the run stops, the row is unknown, one request", 1 === $r['unknown'] && 0 === $r['failed'] && 1 === $st( 'unknown' ) && 1 === count( crdr_t_requests() ), wp_json_encode( $r, JSON_UNESCAPED_UNICODE ) );
@@ -1019,7 +1043,7 @@ foreach ( array( 'timeout' => 'timeout', 'http500' => 'HTTP 500', 'server_busy' 
 	$mockset();
 	CRDR_Playbooks::run( 'dormant', 8 );
 	CRDR_Playbooks::run( 'dormant', 8 );
-	CRDR_Playbooks::save( 'dormant', array( 'name' => 'خواب', 'mode' => 'manual', 'template' => 'سلام {name}', 'offer_type' => 'none', 'daily_cap' => 100 ) );
+	CRDR_Playbooks::save( 'dormant', array( 'name' => 'خواب', 'mode' => 'manual', 'template' => 'سلام {name} {optout}', 'offer_type' => 'none', 'daily_cap' => 100 ) );
 	CRDR_Settings::save( CRDR_Settings::all() );
 	CRDR_Playbooks::run( 'dormant', 8 );
 	t( "ambiguous ({$label}): never retried, not by later runs, not by saving, and the others were served once", 1 === $per_phone()['09120000001'] && 5 === array_sum( $per_phone() ) && 1 === $st( 'unknown' ) );
@@ -1072,9 +1096,12 @@ $order( 'p:09120000001', 100000, 3 );
 $order( 'p:09120000002', 900000, 3 );
 $order( 'p:09120000005', 50000, 3 );
 $res = CRDR_Playbooks::results( 'dormant' );
-t( 'metrics: the comparison counts accepted messages (2) and the control group (1) only; the unknown outcome is in neither', 2 === $res['treated']['n'] && 1 === $res['treated']['conv'] && 1 === $res['holdout']['n'] && 1 === $res['holdout']['conv'], wp_json_encode( $res ) );
-t( 'metrics: the unknown customer\'s big order (900000) is NOT in the treated revenue', 100000.0 === (float) $res['treated']['rev'], wp_json_encode( $res['treated'] ) );
-t( 'metrics: the number of unknown outcomes left out is reported, not hidden', 1 === $res['unknown'] );
+// PHASE 4.2 (CAMP-1 approved): the primary comparison is INTENTION TO TREAT - every customer chosen for the message counts, whatever happened to the SMS
+// (unknown, failed, rejected, unbuildable and still pending included); the old pin (accepted messages only: n 2, conv 1, revenue 100,000) is now the SECONDARY group.
+t( 'metrics (4.2, ITT): the primary treated group is the 7 customers chosen for the message (accepted 2, unknown, failed, rejected, unbuildable, pending), against the 1 control', 7 === $res['treated']['n'] && 2 === $res['treated']['conv'] && 1 === $res['holdout']['n'] && 1 === $res['holdout']['conv'] && 'itt' === $res['basis'], wp_json_encode( $res ) );
+t( 'metrics (4.2, ITT): the unknown customer\'s big order (900000) IS in the primary treated revenue (by assignment: 100,000 + 900,000)', 1000000.0 === (float) $res['treated']['rev'], wp_json_encode( $res['treated'] ) );
+t( 'metrics (4.2, secondary): the accepted-only group is the pre-4.2 comparison: 2 customers, 1 ordered, revenue 100,000; the unknown customer is NOT in it', 2 === $res['accepted']['n'] && 1 === $res['accepted']['conv'] && 100000.0 === (float) $res['accepted']['rev'], wp_json_encode( $res['accepted'] ) );
+t( 'metrics: the number of unknown outcomes is reported, not hidden', 1 === $res['unknown'] );
 t( 'metrics: "messages sent in total" is the accepted ones only (unknown / pending / failed are not counted)', 2 === $res['sent_total'] );
 
 $html = crdr_t_page( array( 'CRDR_Page_Campaigns', 'render' ), array( 'page' => 'customer-radar-campaigns', 'results' => 'dormant' ) );
@@ -1154,14 +1181,14 @@ $msgs = function () {
 	}
 	return $o;
 };
-crdr_t_cfg( array( 'mode' => 'manual', 'offer' => array( 'type' => 'percent', 'percent' => 10, 'days' => 5 ), 'template' => 'سلام {name}، کد {coupon}' ), array(), array(
-	'mode' => 'ok', 'by_phone' => array( '09120000001' => 'invalid_receptor', '09120000002' => 'bad_text', '09120000003' => 'op_failed', '09120000004' => 'timeout', '09120000005' => 'connect_fail' ),
+crdr_t_cfg( array( 'mode' => 'manual', 'offer' => array( 'type' => 'percent', 'percent' => 10, 'days' => 5 ), 'template' => 'سلام {name}، کد {coupon} {optout}' ), array(), array(
+	'mode' => 'ok', 'by_phone' => array( '09120000001' => 'invalid_receptor', '09120000002' => 'bad_text', '09120000004' => 'timeout', '09120000005' => 'connect_fail' ),
 ) );
 crdr_t_reset( 9 );
-CRDR_Playbooks::run( 'dormant', 8 ); // c1 rejected, c2 refused text, c3 unexplained, c4 timeout -> stops
+CRDR_Playbooks::run( 'dormant', 8 ); // c1 rejected, c2 refused text, c3 accepted, c4 timeout -> stops (402 is unknown now and is covered in section 6; 'retry' is no longer written)
 CRDR_Playbooks::run( 'dormant', 8 ); // c5 network failure, the rest accepted
 $by = $msgs();
-foreach ( array( 'rejected', 'nobuild', 'retry', 'failed' ) as $stt ) {
+foreach ( array( 'rejected', 'nobuild', 'failed' ) as $stt ) {
 	$rows = isset( $by[ $stt ] ) ? $by[ $stt ] : array();
 	t( "minimised: '{$stt}' (nothing was sent) keeps NO message text", 1 === count( $rows ) && '' === (string) $rows[0]['message'] && '' !== $rows[0]['error'], wp_json_encode( $rows, JSON_UNESCAPED_UNICODE ) );
 }
@@ -1214,8 +1241,11 @@ foreach ( array( 'Invalid credentials for user admin 09120000001 key TESTKEY', '
 	CRDR_Send::send_claimed( $r['id'], '0912000000' . ( $n + 1 ), 'سلام خصوصی' );
 }
 $rows = crdr_t_rows( "kind = 'sms'" );
-t( 'other SMS plugin: an error text is replaced by our own wording; a timeout / exception is "unknown" with no raw text', 'retry' === $rows[0]['status'] && 'unknown' === $rows[1]['status'] && 'unknown' === $rows[2]['status'] && 0 === preg_match( '/09\d{9}|TESTKEY|Invalid credentials|timed out|internal error/i', implode( "\n", array_column( $rows, 'error' ) ) ), wp_json_encode( array_column( $rows, 'error' ), JSON_UNESCAPED_UNICODE ) );
-t( 'other SMS plugin: its refused SMS keeps no text, its unknown ones keep it', '' === (string) $rows[0]['message'] && '' !== (string) $rows[1]['message'] );
+// PHASE 4.2 (approved): a plain text from that plugin used to be 'failed/uncertain' -> 'retry' (tried again after six hours). It is UNKNOWN now: that plugin
+// catches its gateway's exceptions and returns their text, so a text may come after the gateway accepted the message, and a retry could send it twice.
+// The administrator now sees a MASKED excerpt of the text (no phone number, no key, no link, no long token): the words stay, the secrets do not.
+t( 'other SMS plugin: an error text is UNKNOWN (not retried) with a masked excerpt; a timeout / exception is "unknown" with no raw text', 'unknown' === $rows[0]['status'] && 'unknown' === $rows[1]['status'] && 'unknown' === $rows[2]['status'] && 0 === preg_match( '/09\d{9}|TESTKEY|timed out|internal error/i', implode( "\n", array_column( $rows, 'error' ) ) ) && false !== strpos( $rows[0]['error'], 'Invalid credentials' ), wp_json_encode( array_column( $rows, 'error' ), JSON_UNESCAPED_UNICODE ) );
+t( 'other SMS plugin: every unknown row keeps its text (it may have been sent), none is a contact-free row', '' !== (string) $rows[0]['message'] && '' !== (string) $rows[1]['message'] && '' !== (string) $rows[2]['message'] );
 $GLOBALS['crdr_t_pwsms'] = 'ok';
 crdr_t_reset( 0 );
 
@@ -1240,10 +1270,11 @@ $wpdb->query( 'UPDATE ' . CRDR_DB::contacts() . " SET claim_key = ckey WHERE sta
 $before = $wpdb->get_var( 'SELECT COUNT(*) FROM ' . CRDR_DB::contacts() );
 update_option( 'crdr_db_version', '3' );
 CRDR_DB::maybe_upgrade();
+delete_option( CRDR_DB::REBUILD_OPTION ); // (see the PHASE 4.1 note above)
 $row = function ( $id ) {
 	return crdr_t_rows( 'id = ' . (int) $id )[0];
 };
-t( 'upgrade 3->4: the version moves to 4', '4' === get_option( 'crdr_db_version' ) );
+t( 'upgrade 3->4: the version moves on (to the current version; since Phase 3A that is 5, and the same call also performs 4->5)', CRDR_DB::DB_VERSION === get_option( 'crdr_db_version' ) );
 t( 'upgrade 3->4: text of SMS that were never sent is cleared (failed, rejected, nobuild, retry)', '' === (string) $row( $old['failed'] )['message'] && '' === (string) $row( $old['rejected'] )['message'] && '' === (string) $row( $old['nobuild'] )['message'] && '' === (string) $row( $old['retry'] )['message'] );
 t( 'upgrade 3->4: ok, unknown and pending rows keep their text, status and claim', 'سلام ۵ کد ABC' === $row( $old['ok'] )['message'] && 'سلام ۶' === $row( $old['unknown'] )['message'] && 'سلام ۷' === $row( $old['pending'] )['message'] && 'pending' === $row( $old['pending'] )['status'] && 'p:09121110007' === $row( $old['pending'] )['claim_key'] );
 t( 'upgrade 3->4: no row was removed and no status changed', (int) $before === (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . CRDR_DB::contacts() ) && 'failed' === $row( $old['failed'] )['status'] && 'rejected' === $row( $old['rejected'] )['status'] );
@@ -1252,8 +1283,22 @@ t( 'upgrade 3->4: phone numbers and the API key are removed from old error texts
 $snap = wp_json_encode( crdr_t_rows() );
 update_option( 'crdr_db_version', '3' );
 CRDR_DB::maybe_upgrade();
+delete_option( CRDR_DB::REBUILD_OPTION );
 t( 'upgrade 3->4: running it again changes nothing', $snap === wp_json_encode( crdr_t_rows() ) );
 t( 'upgrade 3->4: a customer is still resting after the cleaning (cooldown unchanged)', 'cooldown' === CRDR_DB::blocked_reason( 'p:09121110005' ) && '' === CRDR_DB::blocked_reason( 'p:09121110001' ) );
+// 4 -> 5 (Phase 3A): the order table gains uid and email; existing rows survive and keep their key
+$wpdb->query( 'TRUNCATE TABLE ' . CRDR_DB::orders() );
+$wpdb->query( $wpdb->prepare( 'INSERT INTO ' . CRDR_DB::orders() . ' (order_id,ckey,ts,net,items) VALUES (%d,%s,%d,%f,%d)', 4242, 'p:09120000042', 1790000000, 1234.0, 2 ) );
+$wpdb->query( 'ALTER TABLE ' . CRDR_DB::orders() . ' DROP COLUMN uid, DROP COLUMN email' );
+update_option( 'crdr_db_version', '4' );
+CRDR_DB::maybe_upgrade();
+delete_option( CRDR_DB::REBUILD_OPTION );
+$ocols = $wpdb->get_col( 'SHOW COLUMNS FROM ' . CRDR_DB::orders(), 0 );
+$orow  = $wpdb->get_row( 'SELECT * FROM ' . CRDR_DB::orders() . ' WHERE order_id = 4242', ARRAY_A );
+t( 'upgrade 4->5: uid and email are added to the order table, the version moves on (to the current 6 since Phase 4.2, which also adds contacts.orphan_ts), the existing row keeps its key, values and gets the defaults', ! array_diff( array( 'uid', 'email' ), $ocols ) && CRDR_DB::DB_VERSION === get_option( 'crdr_db_version' ) && 'p:09120000042' === $orow['ckey'] && '0' === (string) $orow['uid'] && '' === $orow['email'] && 2 === (int) $orow['items'], wp_json_encode( array( $ocols, $orow ) ) );
+CRDR_DB::maybe_upgrade();
+t( 'upgrade 4->5: running it again changes nothing', 1 === (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . CRDR_DB::orders() ) && CRDR_DB::DB_VERSION === get_option( 'crdr_db_version' ) );
+$wpdb->query( 'TRUNCATE TABLE ' . CRDR_DB::orders() );
 $wpdb->query( 'TRUNCATE TABLE ' . CRDR_DB::contacts() );
 crdr_t_reset( 0 );
 
@@ -1276,7 +1321,13 @@ $read = function () {
 };
 $w = crdr_t_parallel( array( array( 'save_settings', '1', '22', '6' ) ), 2 );
 t( 'saving 22..6 through the real handler: nothing is stored and the person is sent back to the form', array( 10, 18 ) === $read() && false !== strpos( (string) ( $w[0]['redirect'] ?? '' ), 'invalid=1' ), wp_json_encode( $w ) );
-wp_cache_delete( 'crdr_settings_draft_1', 'transient' );
+// PHASE 4.2: with a PERSISTENT object cache WordPress keeps transients only in the cache, so deleting the entry here would delete the worker's real draft.
+// Only forget this process's own copy (flush_runtime, WP 6.1+); with the default cache the delete below is the same thing.
+if ( function_exists( 'wp_cache_flush_runtime' ) ) {
+	wp_cache_flush_runtime();
+} elseif ( ! wp_using_ext_object_cache() ) {
+	wp_cache_delete( 'crdr_settings_draft_1', 'transient' );
+}
 $page = crdr_t_page( array( 'CRDR_Page_Settings', 'render' ), array( 'page' => 'customer-radar-settings', 'invalid' => 1 ) );
 t( 'the form comes back with the reason and what was typed', false !== mb_strpos( $page, 'ذخیره نشد' ) && false !== mb_strpos( $page, 'ساعت شروع' ) && false !== strpos( $page, 'value="22"' ) && false !== strpos( $page, 'value="6"' ) );
 $w = crdr_t_parallel( array( array( 'save_settings', '1', '9', '9' ) ), 2 );
@@ -1440,7 +1491,7 @@ crdr_t_reset( 6 );
 $r = CRDR_Playbooks::run( 'dormant', 6 );
 t( 'timeout: the run stops at the uncertain SMS and says so', 1 === $r['unknown'] && 0 === $r['sent'] && '' !== $r['error'] && false !== mb_strpos( $r['error'], 'ممکن است پیامک رفته باشد' ), wp_json_encode( $r, JSON_UNESCAPED_UNICODE ) );
 $u = crdr_t_rows( "status = 'unknown'" );
-t( 'timeout: the row is "unknown" (not failed), keeps message + localid, claim cleared', 1 === count( $u ) && '' !== $u[0]['localid'] && 'سلام مشتری 1' === $u[0]['message'] && null === $u[0]['claim_key'] );
+t( 'timeout: the row is "unknown" (not failed), keeps message + localid, claim cleared', 1 === count( $u ) && '' !== $u[0]['localid'] && 'سلام مشتری 1 لغو۱۱' === $u[0]['message'] && null === $u[0]['claim_key'] );
 t( 'timeout: the request really was made once', 1 === count( crdr_t_requests() ) );
 t( 'timeout: the customer now counts as contacted', 'cooldown' === CRDR_DB::blocked_reason( 'p:09120000001' ) );
 t( 'timeout: ... and uses up the daily cap', 1 === CRDR_Playbooks::sent_today( 'dormant' ) );
@@ -1548,7 +1599,7 @@ function crdr_t_page( $callable, array $get ) {
 $clean = function ( $html ) {
 	return ! preg_match( '/(Warning|Notice|Deprecated|Fatal error)\s*:/', $html ) && false === strpos( $html, 'Stack trace' );
 };
-crdr_t_cfg( array( 'mode' => 'manual', 'template' => 'سلام {name}' ) );
+crdr_t_cfg( array( 'mode' => 'manual', 'template' => 'سلام {name} {optout}' ) );
 crdr_t_reset( 3 );
 $html = crdr_t_page( array( 'CRDR_Page_Campaigns', 'render' ), array( 'page' => 'customer-radar-campaigns' ) );
 t( 'campaign list renders and mentions the hours apply to manual runs too', $clean( $html ) && false !== mb_strpos( $html, 'ساعت مجاز ارسال (خودکار و دستی)' ) );
@@ -1557,7 +1608,7 @@ $html = crdr_t_page( array( 'CRDR_Page_Campaigns', 'render' ), array( 'page' => 
 t( 'edit form after a rejected save: explains what is wrong, in Persian', $clean( $html ) && false !== mb_strpos( $html, 'کمپین ذخیره نشد' ) && false !== mb_strpos( $html, 'notice-error' ) );
 t( 'edit form after a rejected save: keeps what the person typed', false !== mb_strpos( $html, '>کد {coupon}</textarea>' ) );
 $html = crdr_t_page( array( 'CRDR_Page_Campaigns', 'render' ), array( 'page' => 'customer-radar-campaigns', 'edit' => 'dormant' ) );
-t( 'edit form opened normally: stored template, no stale error', $clean( $html ) && false !== mb_strpos( $html, '>سلام {name}</textarea>' ) && false === mb_strpos( $html, 'کمپین ذخیره نشد' ) );
+t( 'edit form opened normally: stored template, no stale error', $clean( $html ) && false !== mb_strpos( $html, '>سلام {name} {optout}</textarea>' ) && false === mb_strpos( $html, 'کمپین ذخیره نشد' ) );
 set_transient( CRDR_Settings::draft_key(), array( 'values' => CRDR_Settings::sanitize( array( 'sms_template' => 'مرحله {coupon}' ) ), 'errors' => array( 'خطای آزمایشی' ) ), 300 );
 $html = crdr_t_page( array( 'CRDR_Page_Settings', 'render' ), array( 'page' => 'customer-radar-settings', 'invalid' => 1 ) );
 t( 'settings after a rejected save: error shown and typed text kept', $clean( $html ) && false !== mb_strpos( $html, 'خطای آزمایشی' ) && false !== mb_strpos( $html, 'مرحله {coupon}' ) );
@@ -1567,6 +1618,1151 @@ CRDR_DB::add_contact( 'p:09120000001', 'sms', array( 'playbook' => 'dormant', 's
 $cid  = (int) $wpdb->get_var( 'SELECT id FROM ' . CRDR_DB::customers() . " WHERE ckey = 'p:09120000001'" );
 $html = crdr_t_page( array( 'CRDR_Page_Customers', 'render_detail' ), array( 'page' => 'customer-radar-customer', 'id' => $cid ) );
 t( 'customer page shows an uncertain SMS as such', $clean( $html ) && false !== mb_strpos( $html, 'نتیجه نامشخص' ) );
+
+/* ============================================== G. sync guard (real database, real processes) */
+echo "== sync guard\n";
+delete_option( CRDR_Sync::STATE_OPTION );
+delete_option( CRDR_Sync::LOCK_OPTION );
+$set_state = function ( $phase, array $extra = array() ) {
+	update_option( CRDR_Sync::STATE_OPTION, array_merge( array( 'phase' => $phase, 'updated' => time(), 'page' => 1, 'total' => 10, 'done' => 0, 'inflight' => 0 ), $extra ), false );
+};
+$contacts = function () use ( $wpdb ) {
+	return (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . CRDR_DB::contacts() );
+};
+crdr_t_cfg( array( 'mode' => 'manual', 'template' => 'سلام {name} {optout}' ) );
+crdr_t_reset( 4 );
+$cid = (int) $wpdb->get_var( 'SELECT id FROM ' . CRDR_DB::customers() . ' ORDER BY id LIMIT 1' );
+
+// ---- while the data is being rebuilt, nothing that sends or lists customers works (every server-side entry point)
+$set_state( 'orders' );
+foreach ( array( 'sms', 'sms_coupon', 'optout', 'called', 'skip' ) as $type ) {
+	$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => $type ) );
+	t( "rebuild running: one-off '{$type}' is refused with the reason", false === $j['success'] && 'sync_running' === $j['data']['code'], wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
+}
+t( 'rebuild running: nothing reached the gateway and no contact (not even an opt-out) was written', 0 === count( crdr_t_requests() ) && 0 === $contacts() );
+$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_preview' ), array( 'id' => $cid, 'coupon' => 0 ) );
+t( 'rebuild running: the one-off preview is refused', false === $j['success'] && 'sync_running' === $j['data']['code'] );
+$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_pb_preview' ), array( 'id' => 'dormant' ) );
+t( 'rebuild running: the campaign preview answers "blocked", with no audience and no samples', true === $j['success'] && 'sync_running' === $j['data']['blocked'] && 0 === $j['data']['audience'] && array() === $j['data']['samples'], wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
+$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_pb_run' ), array( 'id' => 'dormant' ) );
+t( 'rebuild running: the campaign run button (ajax) is refused', true === $j['success'] && 'sync_running' === $j['data']['blocked'] && 0 === $j['data']['sent'], wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
+$r = CRDR_Playbooks::run( 'dormant', 10, array( 'trigger' => 'manual' ) );
+t( 'rebuild running: Playbooks::run() (manual)', 'sync_running' === $r['blocked'] && 0 === $r['sent'] );
+$r = CRDR_Playbooks::run( 'dormant', 10, array( 'trigger' => 'cron' ) );
+t( 'rebuild running: Playbooks::run() (cron)', 'sync_running' === $r['blocked'] && 0 === $r['sent'] );
+crdr_t_cfg( array( 'mode' => 'auto' ) );
+CRDR_Playbooks::hourly();
+t( 'rebuild running: the hourly cron tick sends nothing', 0 === count( crdr_t_requests() ) && 0 === $contacts() );
+$claim = CRDR_Send::claim( 'p:09120000001', 'dormant', 'g' );
+t( 'rebuild running: CRDR_Send::claim() refuses and writes nothing', array( 'skip' => 'syncing' ) === $claim && 0 === $contacts() );
+crdr_t_cfg( array( 'mode' => 'manual', 'template' => 'سلام {name} {optout}' ) );
+$html_calls  = crdr_t_page( array( 'CRDR_Page_Customers', 'render_calls' ), array( 'page' => 'customer-radar-calls' ) );
+$html_list   = crdr_t_page( array( 'CRDR_Page_Customers', 'render_list' ), array( 'page' => 'customer-radar-customers' ) );
+$html_detail = crdr_t_page( array( 'CRDR_Page_Customers', 'render_detail' ), array( 'page' => 'customer-radar-customer', 'id' => $cid ) );
+foreach ( array( 'call list' => $html_calls, 'customer list' => $html_list, 'customer page' => $html_detail ) as $what => $html ) {
+	t( "rebuild running: the {$what} shows the reason instead of customers", false !== mb_strpos( $html, 'در حال به‌روزرسانی' ) && false === strpos( $html, '<table' ) && false === mb_strpos( $html, 'مشتری 1' ) && false === strpos( $html, 'data-act="sms"' ) );
+}
+$html = crdr_t_page( array( 'CRDR_Page_Dashboard', 'render' ), array( 'page' => 'customer-radar' ) );
+t( 'rebuild running: the dashboard warns that its numbers are incomplete', false !== mb_strpos( $html, 'عددهای این صفحه تا پایان به‌روزرسانی کامل نیستند' ) );
+$html = crdr_t_page( array( 'CRDR_Page_Campaigns', 'render' ), array( 'page' => 'customer-radar-campaigns' ) );
+t( 'rebuild running: the campaigns page warns too', false !== mb_strpos( $html, 'عددهای این صفحه تا پایان به‌روزرسانی کامل نیستند' ) );
+$w = crdr_t_parallel( array( array( 'export' ) ), 2 );
+t( 'rebuild running: the CSV export is refused (wp_die) and streams nothing', ! empty( $w[0]['refused'] ) && false !== mb_strpos( $w[0]['message'], 'در حال به‌روزرسانی' ), wp_json_encode( $w, JSON_UNESCAPED_UNICODE ) );
+
+// ---- a failed or stalled rebuild keeps blocking, and says so
+foreach ( array( 'failed' => array( 'failed', array() ), 'stalled' => array( 'orders', array( 'updated' => time() - CRDR_Sync::STALL_AFTER - 10 ) ) ) as $label => $def ) {
+	$set_state( $def[0], $def[1] );
+	$r = CRDR_Playbooks::run( 'dormant', 10, array( 'trigger' => 'manual' ) );
+	$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ) );
+	t( "a {$label} rebuild still blocks campaigns and one-off SMS, with its own reason", $r['blocked'] === ( 'failed' === $label ? 'sync_failed' : 'sync_stalled' ) && false === $j['success'] && 0 === count( crdr_t_requests() ), wp_json_encode( array( $r['blocked'], $j['data']['code'] ?? null ) ) );
+	wp_set_current_user( 1 );
+	t( "a {$label} rebuild is shown to the administrator as a persistent warning", false !== mb_strpos( CRDR_Health::notice_html(), 'تحلیل سفارش‌ها' ) );
+}
+
+// ---- after a successful sync everything works again
+$set_state( 'done' );
+crdr_t_cfg( array( 'mode' => 'manual', 'template' => 'سلام {name} {optout}' ) );
+$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ) );
+t( 'after a successful sync: a one-off SMS is sent', true === $j['success'] && 1 === count( crdr_t_requests() ), wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
+$r = CRDR_Playbooks::run( 'dormant', 10, array( 'trigger' => 'manual' ) );
+t( 'after a successful sync: the campaign runs (3 more customers)', '' === $r['blocked'] && 3 === $r['sent'], wp_json_encode( $r, JSON_UNESCAPED_UNICODE ) );
+$html = crdr_t_page( array( 'CRDR_Page_Customers', 'render_list' ), array( 'page' => 'customer-radar-customers' ) );
+t( 'after a successful sync: the customer list shows customers again', false !== strpos( $html, '<table' ) && false !== mb_strpos( $html, 'مشتری 1' ) );
+$w = crdr_t_parallel( array( array( 'export' ) ), 2 );
+t( 'after a successful sync: the CSV export streams (the file starts with its Persian header row)', empty( $w[0]['refused'] ) && false !== mb_strpos( (string) ( $w[0]['raw'] ?? '' ), 'نام' ), substr( wp_json_encode( $w, JSON_UNESCAPED_UNICODE ), 0, 200 ) );
+
+// ---- a REAL rebuild over real WooCommerce orders and a real database (205 orders = 2 pages)
+$made = array();
+for ( $i = 1; $i <= 205; $i++ ) {
+	$o = wc_create_order();
+	$o->set_billing_phone( sprintf( '0913%07d', $i ) );
+	$o->set_billing_email( "sync{$i}@example.invalid" );
+	crdr_t_money( $o, 1000 );
+	$o->set_status( 'completed' );
+	$o->save();
+	$made[] = $o->get_id();
+}
+$trace = array();
+$s     = CRDR_Sync::start();
+$trace[] = array( $s['phase'], CRDR_Sync::guard()['blocked'], 0 === (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . CRDR_DB::customers() ) );
+t( 'real rebuild: start() empties the tables and the guard is already on', array( 'orders', true, true ) === $trace[0] && 205 === (int) $s['total'], wp_json_encode( $s ) );
+for ( $i = 0; $i < 5; $i++ ) {
+	$s       = CRDR_Sync::step();
+	$trace[] = array( $s['phase'], CRDR_Sync::guard()['blocked'] );
+	if ( 1 === $i ) { // between the pages and the scoring a campaign is still refused
+		$r = CRDR_Playbooks::run( 'dormant', 5, array( 'trigger' => 'manual' ) );
+		t( 'real rebuild: after the last page, while scoring is pending, a campaign run is still refused', 'finalize' === $s['phase'] && 'sync_running' === $r['blocked'] );
+	}
+}
+t( 'real rebuild (2 pages): phases orders, finalize, stats, done; guard on after every request but the last', array_column( $trace, 0 ) === array( 'orders', 'orders', 'finalize', 'stats', 'done', 'done' ) && array( true, true, true, true, false, false ) === array_column( $trace, 1 ), wp_json_encode( $trace ) );
+$sum_orders = (int) $wpdb->get_var( 'SELECT SUM(orders_count) FROM ' . CRDR_DB::customers() );
+t( 'real rebuild: 205 customers and 205 orders, none counted twice', 205 === (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . CRDR_DB::customers() ) && 205 === $sum_orders && 205 === (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . CRDR_DB::orders() ) );
+t( 'real rebuild: the lock row is gone and the state is "done" with no error', null === $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", CRDR_Sync::LOCK_OPTION ) ) && ! isset( CRDR_Sync::state( true )['error'] ) );
+
+// ---- lock contention between real processes: only one may hold it
+$w   = crdr_t_parallel( array_fill( 0, 6, array( 'sync_lock', '1500' ) ), 3 );
+$got = count( array_filter( array_column( $w, 'got' ) ) );
+t( 'six processes ask for the sync lock at the same instant: exactly one gets it (the database decides, not PHP)', 1 === $got, wp_json_encode( $w ) );
+t( 'and the lock is released afterwards', null === $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", CRDR_Sync::LOCK_OPTION ) ) );
+
+// ---- concurrent steps never import a page twice
+$s = CRDR_Sync::start();
+$w = crdr_t_parallel( array_fill( 0, 4, array( 'sync_step' ) ), 3 );
+$advanced = count( array_filter( $w, function ( $x ) {
+	return isset( $x['busy'] ) && ! $x['busy'];
+} ) );
+$st  = CRDR_Sync::state( true );
+$cnt = (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . CRDR_DB::orders() );
+$sum = (int) $wpdb->get_var( 'SELECT COALESCE(SUM(orders_count),0) FROM ' . CRDR_DB::customers() );
+t( 'four concurrent steps: every step that ran advanced one page, and no order is counted twice (customers = orders = pages read)', $advanced >= 1 && (int) $st['page'] === 1 + $advanced && $cnt === $sum && $sum === (int) $st['done'] && ! isset( $st['error'] ), wp_json_encode( array( 'results' => $w, 'state' => array( $st['phase'], $st['page'], $st['done'] ), 'orders' => $cnt, 'customers_sum' => $sum ) ) );
+
+// ---- a step that dies in the middle of a page
+$s = CRDR_Sync::start();
+$w = crdr_t_parallel( array( array( 'sync_die' ) ), 3 );
+$st = CRDR_Sync::state( true );
+t( 'a step that dies mid-page leaves the rebuild marked in-flight and the guard on', ! empty( $w[0]['died_after_orders'] ) && 'orders' === $st['phase'] && ! empty( $st['inflight'] ) && true === CRDR_Sync::guard()['blocked'], wp_json_encode( array( $w, $st ) ) );
+t( 'the dead step\'s lock is released by its shutdown handler (a retry does not wait ten minutes)', null === $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", CRDR_Sync::LOCK_OPTION ) ) );
+$partial = (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . CRDR_DB::orders() );
+$s       = CRDR_Sync::step();
+t( 'the next step does NOT resume the half-applied page: the rebuild fails, nothing more is imported', 'failed' === $s['phase'] && 'interrupted_page' === $s['error'] && $partial === (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . CRDR_DB::orders() ) && $partial > 0 && $partial < 200 );
+$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'type' => 'sms' ) );
+t( 'after the interrupted rebuild, sending stays blocked ("failed") until a new rebuild completes', 'sync_failed' === ( $j['data']['code'] ?? '' ) );
+$s = CRDR_Sync::start();
+for ( $i = 0; $i < 5; $i++ ) {
+	$s = CRDR_Sync::step();
+}
+t( 'retry: a fresh start() rebuilds everything correctly (205 orders, 205 customers, nothing counted twice) and re-opens sending', 'done' === $s['phase'] && false === CRDR_Sync::guard()['blocked'] && 205 === (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . CRDR_DB::orders() ) && 205 === (int) $wpdb->get_var( 'SELECT SUM(orders_count) FROM ' . CRDR_DB::customers() ) );
+foreach ( $made as $oid ) {
+	$o = wc_get_order( $oid );
+	if ( $o ) {
+		$o->delete( true );
+	}
+}
+delete_option( CRDR_Sync::STATE_OPTION );
+delete_option( CRDR_Sync::LOCK_OPTION );
+crdr_t_reset( 0 );
+
+
+/* ============================ H. stale customer ids: a page left open across a rebuild cannot act on somebody else ============================ */
+echo "== stale customer ids\n";
+delete_option( CRDR_Sync::STATE_OPTION );
+crdr_t_cfg( array( 'mode' => 'manual', 'template' => 'سلام {name} {optout}' ) );
+crdr_t_reset( 3 );
+$all_contacts = function () use ( $wpdb ) {
+	return (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . CRDR_DB::contacts() );
+};
+$coupons = function () use ( $wpdb ) {
+	return (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type = 'shop_coupon'" );
+};
+$id_of = function ( $ckey ) use ( $wpdb ) {
+	return (int) $wpdb->get_var( $wpdb->prepare( 'SELECT id FROM ' . CRDR_DB::customers() . ' WHERE ckey = %s', $ckey ) );
+};
+$A = 'p:09120000001';
+$B = 'p:09120000003';
+$idA = $id_of( $A );
+$page = crdr_t_page( array( 'CRDR_Page_Customers', 'render_detail' ), array( 'page' => 'customer-radar-customer', 'id' => $idA ) );
+preg_match( '/data-id="(\d+)" data-k="([0-9a-f]+)"/', $page, $m );
+$page_id = isset( $m[1] ) ? (int) $m[1] : 0;
+$page_k  = isset( $m[2] ) ? $m[2] : '';
+t( 'the customer page carries the row id AND a stable identity token', $page_id === $idA && 24 === strlen( $page_k ) && $page_k === CRDR_Actions::identity( $A ), wp_json_encode( $m ) );
+t( 'the token is not the customer key (no phone number or e-mail in the page attribute) and differs per customer', false === strpos( $page, 'data-k="p:' ) && false === strpos( $page_k, '0912' ) && CRDR_Actions::identity( $A ) !== CRDR_Actions::identity( $B ) );
+
+// ---- control: the page as it was drawn still works while nothing was rebuilt
+$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_preview' ), array( 'id' => $page_id, 'k' => $page_k, 'coupon' => 0 ) );
+t( 'unchanged data: the preview works with the page\'s id and token', true === $j['success'] && $A === 'p:' . $j['data']['phone'], wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
+$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $page_id, 'k' => $page_k, 'type' => 'called' ) );
+t( 'unchanged data: "called" is written for that customer', true === $j['success'] && 1 === crdr_t_count( $wpdb->prepare( 'ckey = %s', $A ) ) );
+crdr_t_reset( 3 );
+
+// ---- no token at all, or a made-up one
+foreach ( array( 'missing' => null, 'made-up' => str_repeat( 'a', 24 ), 'empty' => '' ) as $what => $k ) {
+	$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $idA, 'k' => $k, 'type' => 'optout' ) );
+	t( "a {$what} identity token is refused as stale, nothing is written", false === $j['success'] && 'stale_customer' === ( $j['data']['code'] ?? '' ) && 0 === $all_contacts(), wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
+}
+
+// ---- a rebuild hands the ids out again: the id the page holds now belongs to somebody else
+$wpdb->query( 'TRUNCATE TABLE ' . CRDR_DB::customers() );
+$now = time();
+foreach ( array( 3, 2, 1 ) as $i ) { // reverse order: the id that was customer 1's is customer 3's now
+	$phone = sprintf( '09120000%03d', $i );
+	$wpdb->insert( CRDR_DB::customers(), array( 'ckey' => 'p:' . $phone, 'name' => 'مشتری ' . $i, 'phone' => $phone, 'email' => '', 'orders_count' => 1, 'total_spent' => 100000, 'first_ts' => $now - 90 * 86400, 'last_ts' => $now - 90 * 86400, 'segment' => 'hibernating', 'priority' => 1 ) );
+}
+t( 'setup: after the "rebuild" the old row id points to a DIFFERENT customer', $id_of( $A ) !== $idA && $id_of( $B ) === $idA );
+$coupons_before = $coupons();
+foreach ( array( 'sms', 'sms_coupon', 'called', 'skip', 'optout' ) as $type ) {
+	$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $page_id, 'k' => $page_k, 'type' => $type, 'note' => 'x' ) );
+	t( "stale page, one-off '{$type}': refused as stale (a clear message, code stale_customer)", false === $j['success'] && 'stale_customer' === ( $j['data']['code'] ?? '' ) && false !== mb_strpos( $j['data']['message'] ?? '', 'دوباره بارگذاری' ), wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
+}
+t( 'stale page: NOTHING happened to the customer who now holds the id (no SMS, no contact row, no opt-out, no call note, no coupon)', 0 === count( crdr_t_requests() ) && 0 === $all_contacts() && $coupons() === $coupons_before );
+$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_preview' ), array( 'id' => $page_id, 'k' => $page_k, 'coupon' => 0 ) );
+t( 'stale page: the preview is refused too, and it does not show the other customer\'s phone number or name', false === $j['success'] && 'stale_customer' === ( $j['data']['code'] ?? '' ) && false === strpos( wp_json_encode( $j, JSON_UNESCAPED_UNICODE ), '09120000003' ) && false === mb_strpos( wp_json_encode( $j, JSON_UNESCAPED_UNICODE ), 'مشتری 3' ) );
+
+// ---- the same customer, fresh page: id and token agree again and the action works on the right person
+$idA2 = $id_of( $A );
+$page2 = crdr_t_page( array( 'CRDR_Page_Customers', 'render_detail' ), array( 'page' => 'customer-radar-customer', 'id' => $idA2 ) );
+preg_match( '/data-id="(\d+)" data-k="([0-9a-f]+)"/', $page2, $m2 );
+t( 'a fresh page after the rebuild carries the new id with the SAME stable token', (int) $m2[1] === $idA2 && $idA2 !== $page_id && $m2[2] === $page_k );
+$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $idA2, 'k' => $m2[2], 'type' => 'called' ) );
+t( 'the old token with the customer\'s NEW id works (the identity, not the row id, is what the page vouches for)', true === $j['success'] && 1 === crdr_t_count( $wpdb->prepare( 'ckey = %s', $A ) ) && 1 === $all_contacts() );
+$C  = 'p:09120000002'; // (customer A was just logged as "called", which starts his cooldown: use another customer for the SMS)
+$j  = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $id_of( $C ), 'k' => CRDR_Actions::identity( $C ), 'type' => 'sms' ) );
+t( 'and a real one-off SMS goes to the customer the token names (one gateway call, to his own number)', true === $j['success'] && 1 === count( crdr_t_requests() ) && false !== strpos( wp_json_encode( crdr_t_requests() ), '09120000002' ), wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
+
+// ---- other ways an id can go stale
+$wpdb->query( $wpdb->prepare( 'DELETE FROM ' . CRDR_DB::customers() . ' WHERE ckey = %s', $B ) );
+$before = $all_contacts();
+$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $idA, 'k' => CRDR_Actions::identity( $B ), 'type' => 'optout' ) );
+t( 'a customer who no longer exists after the rebuild: refused as stale, nothing written', false === $j['success'] && 'stale_customer' === ( $j['data']['code'] ?? '' ) && $before === $all_contacts() );
+$wpdb->update( CRDR_DB::customers(), array( 'ckey' => 'p:09129999999', 'phone' => '09129999999' ), array( 'id' => $idA2 ) );
+$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $idA2, 'k' => $m2[2], 'type' => 'optout' ) );
+t( 'the same row id but the customer\'s key changed (new phone after a rebuild): refused as stale', false === $j['success'] && 'stale_customer' === ( $j['data']['code'] ?? '' ) && 0 === crdr_t_count( "kind = 'optout'" ) );
+crdr_t_reset( 0 );
+
+
+/* ============================ I. the sync lock: ownership, renewal, takeover (real database) ============================ */
+echo "== sync lock ownership\n";
+delete_option( CRDR_Sync::STATE_OPTION );
+delete_option( CRDR_Sync::LOCK_OPTION );
+$lock_val  = function () use ( $wpdb ) {
+	return $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", CRDR_Sync::LOCK_OPTION ) );
+};
+$state_row = function () use ( $wpdb ) {
+	return $wpdb->get_row( $wpdb->prepare( "SELECT option_value, autoload FROM {$wpdb->options} WHERE option_name = %s", CRDR_Sync::STATE_OPTION ), ARRAY_A );
+};
+$priv = function ( $method, array $args = array() ) {
+	$m = new ReflectionMethod( 'CRDR_Sync', $method );
+	$m->setAccessible( true );
+	return $m->invokeArgs( null, $args );
+};
+$held = function ( $set = false, $value = null ) {
+	$p = new ReflectionProperty( 'CRDR_Sync', 'held' );
+	$p->setAccessible( true );
+	if ( $set ) {
+		$p->setValue( null, $value );
+	}
+	return $p->getValue();
+};
+
+// ---- the fenced state write on the real database (INSERT ... SELECT ... ON DUPLICATE KEY UPDATE)
+$val = $priv( 'lock' );
+t( 'real database: the lock row is "time:token"', 1 === preg_match( '/^\d+:[0-9a-f]{16}$/', (string) $lock_val() ) && $lock_val() === $val );
+t( 'real database: no state row yet', null === $state_row() );
+$s1 = $priv( 'save_state', array( array( 'phase' => 'orders', 'page' => 1 ) ) );
+$r1 = $state_row();
+t( 'real database: the owner\'s write CREATES the state row (not autoloaded) and get_option reads it back', $r1 && 'no' === $r1['autoload'] && 'orders' === CRDR_Sync::state( true )['phase'] && $s1['rev'] === CRDR_Sync::state( true )['rev'] );
+$s2 = $priv( 'save_state', array( array( 'phase' => 'orders', 'page' => 1 ) ) ); // identical content: only 'updated' / 'rev' differ
+t( 'real database: a second write with the same content is still accepted (the rev field makes every write a change)', $s2['rev'] !== $s1['rev'] && CRDR_Sync::state( true )['rev'] === $s2['rev'] );
+$wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->options} SET option_value = %s WHERE option_name = %s", time() . ':the-taker', CRDR_Sync::LOCK_OPTION ) ); // somebody takes the lock over
+$before = $state_row();
+$lost   = false;
+try {
+	$priv( 'save_state', array( array( 'phase' => 'done', 'page' => 9 ) ) );
+} catch ( CRDR_Sync_Lost $e ) {
+	$lost = true;
+}
+t( 'real database: after the takeover the old owner\'s write is refused by the database (CRDR_Sync_Lost) and the stored state is byte-for-byte unchanged', $lost && $before === $state_row() && 'orders' === CRDR_Sync::state( true )['phase'] );
+CRDR_Sync::unlock( $val );
+t( 'real database: and its unlock() (shutdown handler) leaves the taker\'s lock in place', false !== strpos( (string) $lock_val(), ':the-taker' ) );
+$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name = %s", CRDR_Sync::LOCK_OPTION ) );
+$held( true, null );
+delete_option( CRDR_Sync::STATE_OPTION );
+
+// ---- renewal: compare-and-swap on the exact value we wrote
+$val = $priv( 'lock' );
+$tok = $held()['token'];
+$old = ( time() - CRDR_Sync::LOCK_RENEW - 30 ) . ':' . $tok;
+$wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->options} SET option_value = %s WHERE option_name = %s", $old, CRDR_Sync::LOCK_OPTION ) );
+$held( true, array( 'token' => $tok, 'val' => $old, 'at' => time() - CRDR_Sync::LOCK_RENEW - 30 ) );
+$priv( 'checkpoint' );
+t( 'real database: an old lease is renewed in place (same token, fresh time)', time() - (int) $lock_val() <= 3 && substr( $lock_val(), -16 ) === $tok );
+$old = ( time() - CRDR_Sync::LOCK_RENEW - 30 ) . ':' . $tok;
+$wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->options} SET option_value = %s WHERE option_name = %s", time() . ':the-taker', CRDR_Sync::LOCK_OPTION ) );
+$held( true, array( 'token' => $tok, 'val' => $old, 'at' => time() - CRDR_Sync::LOCK_RENEW - 30 ) );
+$lost = false;
+try {
+	$priv( 'checkpoint' );
+} catch ( CRDR_Sync_Lost $e ) {
+	$lost = true;
+}
+t( 'real database: a renewal after a takeover fails (CRDR_Sync_Lost) and does not overwrite the taker\'s lock', $lost && false !== strpos( (string) $lock_val(), ':the-taker' ) && null === $held() );
+$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name = %s", CRDR_Sync::LOCK_OPTION ) );
+
+// ---- six real processes race to take over the same DEAD lock: exactly one wins
+$wpdb->query( $wpdb->prepare( "INSERT INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')", CRDR_Sync::LOCK_OPTION, ( time() - CRDR_Sync::LOCK_TTL - 120 ) . ':dead-step' ) );
+$w   = crdr_t_parallel( array_fill( 0, 6, array( 'sync_lock', '1500' ) ), 3 );
+$got = count( array_filter( array_column( $w, 'got' ) ) );
+t( 'six processes take over the same dead lock at the same instant: exactly one wins (compare-and-swap in the database)', 1 === $got, wp_json_encode( $w ) );
+t( 'and the winner released it afterwards', null === $lock_val() );
+
+// ---- a LIVE lock is never taken over, however many ask
+$wpdb->query( $wpdb->prepare( "INSERT INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')", CRDR_Sync::LOCK_OPTION, ( time() - 20 ) . ':live-step' ) );
+$w = crdr_t_parallel( array_fill( 0, 4, array( 'sync_lock', '200' ) ), 3 );
+t( 'four processes ask for a lock that is 20 seconds old: nobody gets it, and it is untouched', 0 === count( array_filter( array_column( $w, 'got' ) ) ) && false !== strpos( (string) $lock_val(), ':live-step' ), wp_json_encode( $w ) );
+$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name = %s", CRDR_Sync::LOCK_OPTION ) );
+
+// ---- a real step that loses its lock in the middle of a page (WooCommerce orders, real tables)
+$made = array();
+for ( $i = 1; $i <= 60; $i++ ) {
+	$o = wc_create_order();
+	$o->set_billing_phone( sprintf( '0913%07d', $i ) );
+	$o->set_status( 'completed' );
+	crdr_t_money( $o, 1000 );
+	$o->save();
+	$made[] = $o->get_id();
+}
+CRDR_Sync::start();
+$state0 = CRDR_Sync::state( true );
+$n      = 0;
+$hook   = function ( $v ) use ( &$n, $wpdb, $held ) {
+	if ( 20 === ++$n ) { // order 20 of the page "takes" over a minute, and a second process takes the lock meanwhile
+		$h = $held();
+		$held( true, array( 'token' => $h['token'], 'val' => $h['val'], 'at' => time() - CRDR_Sync::LOCK_RENEW - 1 ) );
+		$wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->options} SET option_value = %s WHERE option_name = %s", time() . ':the-taker', CRDR_Sync::LOCK_OPTION ) );
+	}
+	return $v;
+};
+add_filter( 'woocommerce_order_get_billing_phone', $hook );
+$s = CRDR_Sync::step();
+remove_filter( 'woocommerce_order_get_billing_phone', $hook );
+$stored = CRDR_Sync::state( true );
+$rows   = (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . CRDR_DB::orders() );
+t( 'real step that lost its lock mid-page: reports busy, imports no further order (the order it was in finishes, none after), writes no state', ! empty( $s['busy'] ) && $rows >= 19 && $rows <= 20 && 'orders' === $stored['phase'] && ! empty( $stored['inflight'] ) && $stored['rev'] !== null, wp_json_encode( array( $s, $rows, $stored ) ) );
+t( 'real step that lost its lock: the taker\'s lock is still there and the guard is still on', false !== strpos( (string) $lock_val(), ':the-taker' ) && true === CRDR_Sync::guard()['blocked'] );
+$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name = %s", CRDR_Sync::LOCK_OPTION ) );
+$s = CRDR_Sync::step();
+t( 'the next real owner finds the half-applied page and fails the rebuild instead of resuming it', 'failed' === $s['phase'] && 'interrupted_page' === $s['error'] );
+foreach ( $made as $oid ) {
+	$o = wc_get_order( $oid );
+	if ( $o ) {
+		$o->delete( true );
+	}
+}
+delete_option( CRDR_Sync::STATE_OPTION );
+delete_option( CRDR_Sync::LOCK_OPTION );
+crdr_t_reset( 0 );
+
+
+/* ============================ J. orders that change while the rebuild runs (real WooCommerce orders, real tables) ============================ */
+echo "== reconciliation of orders that change during a rebuild\n";
+delete_option( CRDR_Sync::STATE_OPTION );
+delete_option( CRDR_Sync::LOCK_OPTION );
+crdr_t_cfg();
+$jmade = array();
+for ( $i = 1; $i <= 205; $i++ ) {
+	$o = wc_create_order();
+	$o->set_billing_phone( sprintf( '0914%07d', $i ) );
+	$o->set_status( 50 === $i ? 'pending' : 'completed' ); // order 50 is not counted yet
+	crdr_t_money( $o, 1000 );
+	$o->save();
+	$jmade[ $i ] = $o->get_id();
+}
+$jids = function () use ( $wpdb ) {
+	return array_map( 'intval', $wpdb->get_col( 'SELECT order_id FROM ' . CRDR_DB::orders() ) );
+};
+$jstate = function ( $id, $status ) {
+	$o = wc_get_order( $id );
+	$o->set_status( $status );
+	$o->save();
+};
+CRDR_Sync::start();
+$phases = array();
+$s      = CRDR_Sync::step(); // page 1: the first 200 eligible orders (order 50 is not among them)
+$phases[] = $s['phase'];
+$jstate( $jmade[3], 'cancelled' );   // an order that was already imported leaves the counted statuses ...
+$jstate( $jmade[50], 'completed' );  // ... and one that was skipped becomes eligible: the list shifts under the offset
+for ( $k = 0; $k < 8; $k++ ) {
+	$s        = CRDR_Sync::step();
+	$phases[] = $s['phase'] . ( CRDR_Sync::guard()['blocked'] ? '+' : '-' );
+	if ( 'done' === $s['phase'] ) {
+		break;
+	}
+}
+$eligible = array();
+foreach ( $jmade as $i => $id ) {
+	if ( 3 !== $i ) {
+		$eligible[] = $id;
+	}
+}
+$have    = $jids();
+$missing = array_values( array_diff( $eligible, $have ) );
+$st      = CRDR_Sync::state( true );
+t( 'real rebuild with two orders changing mid-import: EVERY order that is eligible at the end is in the order table (none silently skipped)', array() === $missing && 'done' === $st['phase'], wp_json_encode( array( 'missing' => $missing, 'phases' => $phases, 'state' => $st ) ) );
+t( 'real rebuild: the check found and added what the pages had skipped, and nothing is unresolved', ! empty( $st['added'] ) && empty( $st['unresolved'] ) && empty( $st['unverified'] ), wp_json_encode( $st ) );
+$sum = (int) $wpdb->get_var( 'SELECT SUM(orders_count) FROM ' . CRDR_DB::customers() );
+t( 'real rebuild: no order is counted twice (customers\' order counts add up to the rows of the order table)', $sum === count( $have ) && count( $have ) === count( array_unique( $have ) ), wp_json_encode( array( $sum, count( $have ) ) ) );
+t( 'real rebuild: the guard was on after every request but the last (the extra check did not open a gap)', 'done-' === end( $phases ) && 0 === count( array_filter( array_slice( $phases, 1, -1 ), function ( $p ) {
+	return '+' !== substr( $p, -1 );
+} ) ), wp_json_encode( $phases ) );
+t( 'known limit, stated: the order that was cancelled AFTER it was imported is still counted until the next rebuild', in_array( $jmade[3], $have, true ) );
+// the next rebuild, with nothing changing, is exact: the stale order is gone, nothing is missing
+CRDR_Sync::start();
+for ( $k = 0; $k < 8; $k++ ) {
+	$s = CRDR_Sync::step();
+	if ( 'done' === $s['phase'] ) {
+		break;
+	}
+}
+$have2 = $jids();
+t( 'the next rebuild corrects it: exactly the 204 eligible orders, the cancelled one is gone', 'done' === $s['phase'] && 204 === count( $have2 ) && ! in_array( $jmade[3], $have2, true ) && 204 === (int) $wpdb->get_var( 'SELECT SUM(orders_count) FROM ' . CRDR_DB::customers() ) );
+foreach ( $jmade as $oid ) {
+	$o = wc_get_order( $oid );
+	if ( $o ) {
+		$o->delete( true );
+	}
+}
+delete_option( CRDR_Sync::STATE_OPTION );
+delete_option( CRDR_Sync::LOCK_OPTION );
+crdr_t_reset( 0 );
+
+
+/* ============================ K. the background chain through the real Action Scheduler ============================ */
+echo "== action scheduler chain\n";
+if ( ! function_exists( 'as_enqueue_async_action' ) || ! class_exists( 'ActionScheduler_QueueRunner' ) ) {
+	echo "   (skipped: Action Scheduler is not available here; the chain is then untested)\n";
+} else {
+	delete_option( CRDR_Sync::STATE_OPTION );
+	delete_option( CRDR_Sync::LOCK_OPTION );
+	crdr_t_cfg();
+	as_unschedule_all_actions( CRDR_Sync::STEP_HOOK );
+	$kmade = array();
+	for ( $i = 1; $i <= 205; $i++ ) {
+		$o = wc_create_order();
+		$o->set_billing_phone( sprintf( '0915%07d', $i ) );
+		$o->set_status( 'completed' );
+		crdr_t_money( $o, 1000 );
+		$o->save();
+		$kmade[] = $o->get_id();
+	}
+	$pending = function () {
+		return count( as_get_scheduled_actions( array( 'hook' => CRDR_Sync::STEP_HOOK, 'status' => ActionScheduler_Store::STATUS_PENDING ), 'ids' ) );
+	};
+	$run_queue = function () {
+		ActionScheduler_QueueRunner::instance()->run( 'crdr-test' );
+	};
+	CRDR_Sync::start_background(); // what the nightly job does
+	t( 'nightly start: the rebuild started and ONE step is queued in Action Scheduler', 'orders' === CRDR_Sync::state( true )['phase'] && 1 === $pending() );
+	t( 'while the chain is queued, sending is blocked', true === CRDR_Sync::guard()['blocked'] );
+	// The runner takes the queue oldest first, and every order created above queued WooCommerce actions of its own: ours waits
+	// behind them. So run the runner until the chain has ended (one call handles one action here).
+	$rounds = 0;
+	while ( $pending() > 0 && $rounds < 1500 ) {
+		$run_queue();
+		$rounds++;
+	}
+	$st = CRDR_Sync::state( true );
+	t( 'the real queue runner drives the whole rebuild to "done" (2 pages, scoring, analytics), one step per action', 'done' === $st['phase'] && empty( $st['error'] ) && 205 === (int) $st['done'], wp_json_encode( array( $st, $rounds ) ) );
+	t( 'the chain ends by itself: no step is left queued, and sending is allowed again', 0 === $pending() && false === CRDR_Sync::guard()['blocked'] );
+	t( 'the data is right: 205 orders, 205 customers, none counted twice', 205 === (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . CRDR_DB::orders() ) && 205 === (int) $wpdb->get_var( 'SELECT SUM(orders_count) FROM ' . CRDR_DB::customers() ) );
+	t( 'the lock is free after the chain', null === $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", CRDR_Sync::LOCK_OPTION ) ) );
+
+	// a failing step ends the chain (it does not retry on its own) and the guard stays on
+	as_unschedule_all_actions( CRDR_Sync::STEP_HOOK );
+	CRDR_Sync::start_background();
+	$boom = function ( $v ) {
+		if ( doing_action( CRDR_Sync::STEP_HOOK ) ) { // only inside our own queued step, not in WooCommerce's other actions
+			throw new RuntimeException( 'simulated failure while reading an order' );
+		}
+		return $v;
+	};
+	add_filter( 'woocommerce_order_get_billing_phone', $boom );
+	$rounds = 0;
+	while ( $pending() > 0 && $rounds < 1500 ) {
+		$run_queue();
+		$rounds++;
+	}
+	remove_filter( 'woocommerce_order_get_billing_phone', $boom );
+	$st = CRDR_Sync::state( true );
+	t( 'a step that throws inside the real queue runner: the rebuild is "failed", NO further step is queued, the guard stays on', 'failed' === $st['phase'] && 0 === $pending() && true === CRDR_Sync::guard()['blocked'], wp_json_encode( $st ) );
+
+	// a second action while one is running: the lock makes it wait, and the chain reschedules instead of ending
+	as_unschedule_all_actions( CRDR_Sync::STEP_HOOK );
+	CRDR_Sync::start();
+	$wpdb->query( $wpdb->prepare( "INSERT INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')", CRDR_Sync::LOCK_OPTION, ( time() - 5 ) . ':another-step' ) );
+	CRDR_Sync::background_step();
+	t( 'an action that finds another step running does nothing and schedules itself again (the chain does not die, and does not run twice)', 'orders' === CRDR_Sync::state( true )['phase'] && 1 === (int) CRDR_Sync::state( true )['page'] && false !== wp_next_scheduled( CRDR_Sync::STEP_HOOK ) );
+	wp_clear_scheduled_hook( CRDR_Sync::STEP_HOOK );
+	$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name = %s", CRDR_Sync::LOCK_OPTION ) );
+
+	as_unschedule_all_actions( CRDR_Sync::STEP_HOOK );
+	foreach ( $kmade as $oid ) {
+		$o = wc_get_order( $oid );
+		if ( $o ) {
+			$o->delete( true );
+		}
+	}
+	delete_option( CRDR_Sync::STATE_OPTION );
+	delete_option( CRDR_Sync::LOCK_OPTION );
+	crdr_t_reset( 0 );
+}
+
+
+/* ============================ L. customer identity (real WooCommerce orders, real tables, real contact history) ============================ */
+echo "== customer identity\n";
+delete_option( CRDR_Sync::LINKS_OPTION );
+delete_option( CRDR_Sync::STATE_OPTION );
+delete_option( CRDR_Sync::LOCK_OPTION );
+crdr_t_cfg( array( 'mode' => 'manual', 'template' => 'سلام {name} {optout}', 'audience' => array( 'segments' => array( 'new', 'champion', 'loyal', 'potential', 'cant_lose', 'at_risk', 'need_attention', 'hibernating', 'lost' ) ) ) );
+crdr_t_reset( 0 );
+$lmade = array();
+$lorder = function ( $phone, $email, $uid, $days_ago, $total, $first = 'علی' ) use ( &$lmade ) {
+	$o = wc_create_order();
+	$o->set_billing_phone( $phone );
+	$o->set_billing_email( $email );
+	$o->set_billing_first_name( $first );
+	$o->set_customer_id( $uid );
+	$o->set_date_created( time() - $days_ago * 86400 );
+	$o->set_status( 'completed' );
+	crdr_t_money( $o, $total );
+	$o->save();
+	$lmade[] = $o->get_id();
+	return $o->get_id();
+};
+// G2: three orders, email only in between, a new phone at the end
+$g1 = $lorder( '0912-345-6789', 'g2@example.test', 0, 200, 300000 );
+$g2 = $lorder( '', 'G2@Example.test', 0, 100, 200000 );
+$g3 = $lorder( '09351234567', 'g2@example.test', 0, 10, 250000 );
+// two erased orders and one with malformed contact data
+$e1 = $lorder( '00000000000', 'deleted@site.invalid', 0, 150, 120000, '' );
+$e2 = $lorder( '00000000000', 'deleted@site.invalid', 0, 140, 130000, '' );
+$m1 = $lorder( 'abc', '', 0, 30, 100000, '' ); // (WooCommerce refuses to store a malformed email through its API; that case is in tests/identity.php)
+// a registered user who changed phone and email
+$r1 = $lorder( '09121110001', 'x1@example.test', 77, 120, 100000 );
+$r2 = $lorder( '09122220002', 'x2@example.test', 77, 20, 100000 );
+// a shared mailbox: one email, three different phones, no account
+$s1 = $lorder( '09125550001', 'office@example.test', 0, 90, 100000 );
+$s2 = $lorder( '09125550002', 'office@example.test', 0, 80, 100000 );
+$s3 = $lorder( '09125550003', 'office@example.test', 0, 70, 100000 );
+// an ordinary customer
+$n1 = $lorder( '09120000005', 'u5@example.test', 0, 60, 450000 );
+// contact history written under the OLD keys (before this rebuild existed): an opt-out under the old phone, a recent SMS under the email-only key
+CRDR_DB::add_contact( 'p:09123456789', 'optout', array( 'playbook' => 'manual', 'message' => 'x' ) );
+CRDR_DB::add_contact( 'e:g2@example.test', 'sms', array( 'playbook' => 'dormant', 'status' => 'ok' ) );
+CRDR_DB::add_contact( 'p:09121110001', 'called', array( 'playbook' => 'manual' ) );
+$lrebuild = function () {
+	CRDR_Sync::start();
+	for ( $k = 0; $k < 12; $k++ ) {
+		$s = CRDR_Sync::step();
+		if ( 'done' === $s['phase'] || 'failed' === $s['phase'] ) {
+			return $s;
+		}
+	}
+	return $s;
+};
+$lrow = function ( $ckey ) use ( $wpdb ) {
+	return $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . CRDR_DB::customers() . ' WHERE ckey = %s', $ckey ), ARRAY_A );
+};
+$lkeys = function () use ( $wpdb ) {
+	$k = $wpdb->get_col( 'SELECT ckey FROM ' . CRDR_DB::customers() );
+	sort( $k );
+	return $k;
+};
+$s = $lrebuild();
+$st = CRDR_Sync::state( true );
+t( 'identity: the rebuild finishes ("done"), nothing unresolved', 'done' === $s['phase'] && empty( $st['error'] ) && 0 === (int) $st['inflight'], wp_json_encode( $st ) );
+t( 'identity: 12 orders in, 9 customers out (G2 joined, the registered user joined, the shared mailbox NOT joined, 3 unidentifiable orders apart, 1 ordinary)', 9 === count( $lkeys() ) && 12 === (int) $wpdb->get_var( 'SELECT SUM(orders_count) FROM ' . CRDR_DB::customers() ) && 12 === (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . CRDR_DB::orders() ), wp_json_encode( $lkeys() ) );
+t( 'identity: the report is in the state (joined 3 customers into 2 people)', 3 === (int) $st['identity']['joined'] && 2 === (int) $st['identity']['people'] && 1 === (int) $st['identity']['emails_shared'] && 3 === (int) $st['identity']['unidentified'], wp_json_encode( $st['identity'] ) );
+$g = $lrow( 'p:09351234567' );
+t( 'identity: G2 is ONE customer keyed by the latest phone, with all three orders, the summed spend and the number to send to', $g && 3 === (int) $g['orders_count'] && 750000.0 === (float) $g['total_spent'] && '09351234567' === $g['phone'] && 'g2@example.test' === $g['email'], wp_json_encode( $g ) );
+t( 'identity: the old G2 keys are gone from the customer table and from the orders table', null === $lrow( 'p:09123456789' ) && null === $lrow( 'e:g2@example.test' ) && 0 === (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM ' . CRDR_DB::orders() . ' WHERE ckey IN (%s,%s)', 'p:09123456789', 'e:g2@example.test' ) ) && 3 === (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM ' . CRDR_DB::orders() . ' WHERE ckey = %s', 'p:09351234567' ) ) );
+$u = $lrow( 'p:09122220002' );
+t( 'identity: the registered user with two phones and two emails is one customer (latest phone, latest email, user id kept)', $u && 2 === (int) $u['orders_count'] && 77 === (int) $u['user_id'] && 'x2@example.test' === $u['email'] && null === $lrow( 'p:09121110001' ) );
+t( 'identity: the shared mailbox stays three customers, each with its own phone', 1 === (int) $lrow( 'p:09125550001' )['orders_count'] && 1 === (int) $lrow( 'p:09125550002' )['orders_count'] && 1 === (int) $lrow( 'p:09125550003' )['orders_count'] );
+$un = $wpdb->get_results( "SELECT * FROM " . CRDR_DB::customers() . " WHERE ckey LIKE 'o:%' ORDER BY ckey", ARRAY_A );
+t( 'identity: the two erased orders and the malformed one are three separate customers with no phone and no email', 3 === count( $un ) && array( '', '', '' ) === array_column( $un, 'phone' ) && array( '', '', '' ) === array_column( $un, 'email' ) && array( 1, 1, 1 ) === array_map( 'intval', array_column( $un, 'orders_count' ) ), wp_json_encode( $un ) );
+t( 'identity: the unidentifiable customers still count in the order totals (revenue is the sum of every order)', 1.0 * ( 300000 + 200000 + 250000 + 120000 + 130000 + 100000 + 200000 + 300000 + 450000 ) === (float) $wpdb->get_var( 'SELECT SUM(total_spent) FROM ' . CRDR_DB::customers() ) );
+// ---- contact history follows the person
+// CHANGED in Phase 3A.1 (was: 'the opt-out ... now belong to the joined customer', expecting NO row left under the old keys): opt-out rows are now COPIED to
+// every key of the person and stay under their old keys too, so that the person stays opted out whatever happens to the joined key later.
+t( 'identity: the SMS recorded under the old email-only key moved to the joined customer, and the opt-out recorded under the old phone is now on the joined customer too (and still on the old key)', 2 === crdr_t_count( $wpdb->prepare( 'ckey = %s', 'p:09351234567' ) ) && 1 === crdr_t_count( $wpdb->prepare( 'ckey = %s AND kind = %s', 'p:09351234567', 'optout' ) ) && 0 === crdr_t_count( $wpdb->prepare( "ckey IN (%s,%s) AND kind <> 'optout'", 'p:09123456789', 'e:g2@example.test' ) ) && 1 === crdr_t_count( $wpdb->prepare( 'ckey = %s AND kind = %s', 'p:09123456789', 'optout' ) ) );
+t( 'identity: the joined customer is still opted out (blocked_reason), so no message can reach the new number', 'optout' === CRDR_DB::blocked_reason( 'p:09351234567' ) );
+t( 'identity: a call note under the old phone of the registered user follows him to his new key (cooldown holds)', 1 === crdr_t_count( $wpdb->prepare( 'ckey = %s AND kind = %s', 'p:09122220002', 'called' ) ) && 'cooldown' === CRDR_DB::blocked_reason( 'p:09122220002' ) );
+$claim = CRDR_Send::claim( 'p:09351234567', 'dormant', 'L1' );
+t( 'identity: claiming the joined customer for a campaign is refused (opted out)', array( 'skip' => 'optout' ) === $claim );
+// ---- campaigns: nobody opted out, in cooldown or without a phone is messaged
+$before_req = count( crdr_t_requests() );
+$res        = CRDR_Playbooks::run( 'dormant', 50, array( 'trigger' => 'manual' ) );
+$sent_to    = array();
+foreach ( crdr_t_requests() as $rq ) {
+	$sent_to[] = wp_json_encode( $rq );
+}
+$all_sent = implode( ' ', $sent_to );
+t( 'identity: a campaign over every segment messages only the customers that may be messaged: the shared-mailbox phones and the ordinary customer (4), not the opted-out G2, not the registered user in cooldown, nobody without a phone', 4 === count( crdr_t_requests() ) - $before_req && false === strpos( $all_sent, '09351234567' ) && false === strpos( $all_sent, '09123456789' ) && false === strpos( $all_sent, '09122220002' ) && false !== strpos( $all_sent, '09125550001' ) && false !== strpos( $all_sent, '09120000005' ), wp_json_encode( array( $res, $sent_to ) ) );
+t( 'identity: no message at all was attempted for the three unidentifiable customers (no phone: they are not in a campaign audience)', 0 === crdr_t_count( "ckey LIKE 'o:%'" ) );
+// ---- the stale-id protection with the new keys
+$gid = (int) $lrow( 'p:09351234567' )['id'];
+$j   = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $gid, 'k' => CRDR_Actions::identity( 'p:09123456789' ), 'type' => 'called' ) );
+$cnt = crdr_t_count( $wpdb->prepare( 'ckey = %s', 'p:09351234567' ) );
+t( 'identity: a page drawn BEFORE the join (token of the old phone key) cannot act on the joined customer: refused as stale, nothing written', false === $j['success'] && 'stale_customer' === ( $j['data']['code'] ?? '' ) && 2 === $cnt, wp_json_encode( $j ) );
+$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $gid, 'type' => 'called' ) );
+t( 'identity: a page drawn AFTER the join (current token) works on the joined customer', true === $j['success'] && 3 === crdr_t_count( $wpdb->prepare( 'ckey = %s', 'p:09351234567' ) ) );
+// ---- a second rebuild changes nothing
+$keys1 = $lkeys();
+$cont1 = (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . CRDR_DB::contacts() );
+$sums1 = $wpdb->get_results( 'SELECT ckey, orders_count, total_spent FROM ' . CRDR_DB::customers() . ' ORDER BY ckey', ARRAY_A );
+$s     = $lrebuild();
+t( 'identity: rebuilding again gives the same customers, the same totals and the same contact history (repeatable, nothing re-keyed twice)', 'done' === $s['phase'] && $keys1 === $lkeys() && $sums1 === $wpdb->get_results( 'SELECT ckey, orders_count, total_spent FROM ' . CRDR_DB::customers() . ' ORDER BY ckey', ARRAY_A ) && $cont1 === (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . CRDR_DB::contacts() ) );
+// ---- the person changes phone again: the key follows, the history follows
+$lorder( '09350009999', 'g2@example.test', 0, 1, 100000 );
+CRDR_DB::add_contact( 'p:09351234567', 'skip', array( 'playbook' => 'manual' ) );
+$s = $lrebuild();
+t( 'identity: the joins are remembered in an option (member => canonical key)', array( 'e:g2@example.test' => 'p:09351234567', 'p:09121110001' => 'p:09122220002', 'p:09123456789' => 'p:09351234567' ) === get_option( CRDR_Sync::LINKS_OPTION ), wp_json_encode( get_option( CRDR_Sync::LINKS_OPTION ) ) );
+t( 'identity: a later order with a THIRD phone for the same email (it is a "shared mailbox" for new joins now) does NOT take G2 apart: the joined customer keeps its key, its 3 orders and its opt-out; the new phone is a separate customer', 'done' === $s['phase'] && null !== $lrow( 'p:09351234567' ) && null !== $lrow( 'p:09350009999' ) && null === $lrow( 'p:09123456789' ) && 3 === (int) $lrow( 'p:09351234567' )['orders_count'] && 'optout' === CRDR_DB::blocked_reason( 'p:09351234567' ) && 0 === crdr_t_count( $wpdb->prepare( 'ckey = %s', 'p:09350009999' ) ), wp_json_encode( $lkeys() ) );
+t( 'identity: ... and the old phone of the opted-out person did NOT come back as a customer without history', null === $lrow( 'p:09123456789' ) && null === $lrow( 'e:g2@example.test' ) );
+// ---- failure in the middle of the identity step
+$orig_in_flight = array( 'phase' => 'finalize', 'page' => 2, 'total' => 12, 'done' => 12, 'inflight' => 'resolve', 'updated' => time() );
+update_option( CRDR_Sync::STATE_OPTION, $orig_in_flight, false );
+$s = CRDR_Sync::step();
+t( 'identity: a step found dead in the middle of the identity step (in-flight marker) fails the rebuild instead of continuing; sending stays blocked', 'failed' === $s['phase'] && 'interrupted_page' === $s['error'] && true === CRDR_Sync::guard()['blocked'] );
+$seen_state = null;
+$boom       = function ( $q ) use ( &$seen_state, $wpdb ) {
+	if ( false !== strpos( $q, 'UPDATE ' . CRDR_DB::contacts() . ' SET ckey' ) ) {
+		// what the stored rebuild state says at the very moment contact history is being re-keyed
+		$seen_state = maybe_unserialize( $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", CRDR_Sync::STATE_OPTION ) ) );
+		throw new RuntimeException( 'simulated database error while re-keying contacts' );
+	}
+	return $q;
+};
+// make the identity step have something to do again, then break it half way
+$wpdb->query( 'TRUNCATE TABLE ' . CRDR_DB::contacts() );
+CRDR_DB::add_contact( 'p:09351234567', 'optout', array( 'playbook' => 'manual' ) );
+$lorder( '', 'office2@example.test', 0, 5, 100000 );
+$lorder( '09126660001', 'office2@example.test', 0, 4, 100000 );
+add_filter( 'query', $boom );
+$s = $lrebuild();
+remove_filter( 'query', $boom );
+$errs_ok = 'failed' === $s['phase'];
+t( 'identity: while contact history is being re-keyed the stored state says "in flight: resolve" and is unsafe (so a process that dies right there fails the rebuild)', is_array( $seen_state ) && 'resolve' === $seen_state['inflight'] && 'finalize' === $seen_state['phase'] && true === CRDR_Sync::guard()['blocked'], wp_json_encode( $seen_state ) );
+t( 'identity: an error in the middle of the identity step fails the rebuild (never "done" with half-joined data), sending stays blocked', $errs_ok && true === CRDR_Sync::guard()['blocked'], wp_json_encode( CRDR_Sync::state( true ) ) );
+$s = $lrebuild();
+t( 'identity: a new rebuild after that failure completes and gives the correct, joined result', 'done' === $s['phase'] && false === CRDR_Sync::guard()['blocked'] && null !== $lrow( 'p:09126660001' ) && null === $lrow( 'e:office2@example.test' ) );
+foreach ( $lmade as $oid ) {
+	$o = wc_get_order( $oid );
+	if ( $o ) {
+		$o->delete( true );
+	}
+}
+delete_option( CRDR_Sync::STATE_OPTION );
+delete_option( CRDR_Sync::LOCK_OPTION );
+delete_option( CRDR_Sync::LINKS_OPTION );
+crdr_t_reset( 0 );
+
+
+/* ============================ M. identity integrity: opt-outs, failures at every boundary, remembered joins, repair ============================ */
+echo "== identity integrity\n";
+$mmade = array();
+$mo = function ( $phone, $email, $uid, $days, $status = 'completed' ) use ( &$mmade ) {
+	$o = wc_create_order();
+	$o->set_billing_phone( $phone );
+	$o->set_billing_email( $email );
+	$o->set_billing_first_name( 'علی' );
+	$o->set_customer_id( $uid );
+	$o->set_date_created( time() - $days * 86400 );
+	$o->set_status( $status );
+	crdr_t_money( $o, 1000 );
+	$o->save();
+	$mmade[ $o->get_id() ] = true;
+	return $o->get_id();
+};
+$mset = function ( $id, $status ) {
+	$o = wc_get_order( $id );
+	$o->set_status( $status );
+	$o->save();
+};
+$mreset = function () use ( $wpdb ) {
+	$wpdb->query( 'TRUNCATE TABLE ' . CRDR_DB::contacts() );
+	foreach ( array( CRDR_Sync::LINKS_OPTION, CRDR_Sync::APART_OPTION, CRDR_Sync::STATE_OPTION, CRDR_Sync::LOCK_OPTION ) as $opt ) {
+		delete_option( $opt );
+	}
+	crdr_t_cfg( array( 'mode' => 'manual', 'template' => 'سلام {name} {optout}', 'audience' => array( 'segments' => array( 'new', 'champion', 'loyal', 'potential', 'cant_lose', 'at_risk', 'need_attention', 'hibernating', 'lost' ) ) ) );
+};
+$mrebuild = function () {
+	CRDR_Sync::start();
+	for ( $k = 0; $k < 12; $k++ ) {
+		$s = CRDR_Sync::step();
+		if ( in_array( $s['phase'], array( 'done', 'failed' ), true ) ) {
+			return $s['phase'];
+		}
+	}
+	return '?';
+};
+$mkeys = function () use ( $wpdb ) {
+	$k = $wpdb->get_col( 'SELECT ckey FROM ' . CRDR_DB::customers() );
+	sort( $k );
+	return $k;
+};
+$mblocked = function ( $k ) {
+	return CRDR_DB::blocked_reason( $k );
+};
+$optout = function ( $k ) {
+	CRDR_DB::add_contact( $k, 'optout', array( 'playbook' => 'manual' ) );
+};
+$count_kind = function ( $ckey, $kind ) use ( $wpdb ) {
+	return (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM ' . CRDR_DB::contacts() . ' WHERE ckey = %s AND kind = %s', $ckey, $kind ) );
+};
+$P1 = 'p:09121110001';
+$P2 = 'p:09122220002';
+
+// ---- 1. the opt-out is never lost when the key that held it stops being a customer
+$mreset();
+$a = $mo( '09121110001', 'x@example.test', 0, 100 );
+$b = $mo( '09122220002', 'x@example.test', 0, 10 );
+t( 'integrity: the two phones of one email are joined (key = the latest phone)', 'done' === $mrebuild() && array( $P2 ) === $mkeys() );
+$optout( $P2 ); // the joined customer is opted out (recorded for the canonical key only, as an older version or a direct write would)
+$mset( $b, 'cancelled' ); // the order that gave the joined customer its key leaves the counted statuses
+t( 'integrity: the joined customer opted out; its newest order is cancelled; the old phone is a customer again and is STILL opted out (was: not blocked)', 'done' === $mrebuild() && array( $P1 ) === $mkeys() && 'optout' === $mblocked( $P1 ), wp_json_encode( array( $mkeys(), $mblocked( $P1 ) ) ) );
+$mreset();
+$mset( $b, 'completed' );
+$optout( $P1 ); // opted out BEFORE the join, under the old phone
+t( 'integrity: opted out under the old phone before the join: joined customer is opted out, AND the old key keeps its own row (rows are copied, never only moved)', 'done' === $mrebuild() && 'optout' === $mblocked( $P2 ) && 1 === $count_kind( $P1, 'optout' ) && 1 === $count_kind( $P2, 'optout' ), wp_json_encode( array( $count_kind( $P1, 'optout' ), $count_kind( $P2, 'optout' ) ) ) );
+$mset( $b, 'cancelled' );
+t( 'integrity: ... then the joined customer\'s newest order is cancelled: the old phone is still opted out', 'done' === $mrebuild() && array( $P1 ) === $mkeys() && 'optout' === $mblocked( $P1 ) );
+$mset( $b, 'completed' );
+
+// ---- 2. an opt-out clicked on the joined customer is written for every key of the person (the real handler)
+$mreset();
+t( 'integrity: (setup) joined again', 'done' === $mrebuild() && array( $P2 ) === $mkeys() );
+$gid = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT id FROM ' . CRDR_DB::customers() . ' WHERE ckey = %s', $P2 ) );
+$j   = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $gid, 'type' => 'optout' ) );
+t( 'integrity: "do not message" on the joined customer writes an opt-out for the joined key AND for the key it was joined from', true === $j['success'] && 1 === $count_kind( $P2, 'optout' ) && 1 === $count_kind( $P1, 'optout' ), wp_json_encode( array( $j, $count_kind( $P1, 'optout' ) ) ) );
+$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $gid, 'type' => 'optout' ) );
+$mset( $b, 'cancelled' );
+t( 'integrity: ... so it also holds after the newest order is cancelled (no rebuild needed to propagate it)', 'done' === $mrebuild() && 'optout' === $mblocked( $P1 ) );
+$mset( $b, 'completed' );
+
+// ---- 3. what deleting the whole list of remembered joins really does (tested, not assumed)
+$mreset();
+$c = $mo( '09123330003', 'x@example.test', 0, 2, 'cancelled' ); // a third phone for the same email, not counted yet
+t( 'integrity: (setup) two phones joined', 'done' === $mrebuild() && array( $P2 ) === $mkeys() );
+CRDR_DB::add_contact( $P2, 'sms', array( 'playbook' => 'dormant', 'status' => 'ok' ) ); // a recent SMS (cooldown) under the joined key
+$gid = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT id FROM ' . CRDR_DB::customers() . ' WHERE ckey = %s', $P2 ) );
+crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $gid, 'type' => 'optout' ) );
+$mset( $c, 'completed' ); // the third phone arrives: the email is a shared mailbox for NEW joins now
+t( 'integrity: the third phone does not take the person apart (sticky joins)', 'done' === $mrebuild() && array( $P2, 'p:09123330003' ) === $mkeys() );
+delete_option( CRDR_Sync::LINKS_OPTION );
+$ph = $mrebuild();
+t( 'integrity: deleting the whole links option: the person falls apart into three customers (the rules no longer join a shared mailbox)', 'done' === $ph && array( $P1, $P2, 'p:09123330003' ) === $mkeys(), wp_json_encode( $mkeys() ) );
+t( 'integrity: ... but BOTH old keys are still opted out (the opt-out was written for every key); only the brand-new third phone, which was never connected, is not', 'optout' === $mblocked( $P1 ) && 'optout' === $mblocked( $P2 ) && '' === $mblocked( 'p:09123330003' ) );
+t( 'integrity: ... and the cooldown from the recent SMS stays with the joined key only (documented: the history is not split back)', 'cooldown' !== $mblocked( $P1 ) && 1 === $count_kind( $P2, 'sms' ) && 0 === $count_kind( $P1, 'sms' ) );
+$mset( $c, 'cancelled' );
+
+// ---- 4. damaged list of remembered joins
+$mreset();
+update_option( CRDR_Sync::LINKS_OPTION, array( $P1 => array( 'x' ), 'junk' => 5, 'p:09120000009' => 'p:09120000008', 7 => $P2 ), false );
+$ph = $mrebuild();
+$st = CRDR_Sync::state( true );
+t( 'integrity: a damaged links option (array value, junk, numbers) does not fail the rebuild (was: TypeError, every rebuild failed)', 'done' === $ph && array( $P2 ) === $mkeys(), wp_json_encode( $st ) );
+t( 'integrity: ... the damage is counted in the report and the option is rewritten clean', (int) $st['identity']['links_dropped'] >= 3 && array( $P1 => $P2 ) === get_option( CRDR_Sync::LINKS_OPTION ), wp_json_encode( array( $st['identity'], get_option( CRDR_Sync::LINKS_OPTION ) ) ) );
+update_option( CRDR_Sync::LINKS_OPTION, 'not an array at all', false );
+t( 'integrity: an option that is a plain string is treated as "no joins" and repaired', 'done' === $mrebuild() && array( $P1 => $P2 ) === get_option( CRDR_Sync::LINKS_OPTION ) );
+
+// ---- 5. supported repair of a wrong join: unjoin()
+$mreset();
+$optout( $P1 ); // person X (old phone) opted out earlier
+$mrebuild();
+t( 'integrity: (setup) two people sharing an email are joined; the joined customer is opted out (conservative)', array( $P2 ) === $mkeys() && 'optout' === $mblocked( $P2 ) );
+t( 'repair: invalid keys are refused', array( 'ok' => false, 'reason' => 'no_valid_key' ) === CRDR_Sync::unjoin( array( 'junk', '' ) ) );
+update_option( CRDR_Sync::STATE_OPTION, array( 'phase' => 'orders', 'updated' => time() ), false );
+t( 'repair: refused while a rebuild is running', 'rebuild_running' === CRDR_Sync::unjoin( array( $P1 ) )['reason'] );
+delete_option( CRDR_Sync::STATE_OPTION );
+$wpdb->query( $wpdb->prepare( "INSERT INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')", CRDR_Sync::LOCK_OPTION, ( time() - 5 ) . ':another-step' ) );
+t( 'repair: refused while another step holds the sync lock', 'busy' === CRDR_Sync::unjoin( array( $P1 ) )['reason'] );
+$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name = %s", CRDR_Sync::LOCK_OPTION ) );
+$r = CRDR_Sync::unjoin( array( $P1 ) );
+t( 'repair: unjoin() succeeds; the link is removed and the key is kept apart', true === $r['ok'] && array() === get_option( CRDR_Sync::LINKS_OPTION ) && array( $P1 ) === get_option( CRDR_Sync::APART_OPTION ), wp_json_encode( array( $r, get_option( CRDR_Sync::LINKS_OPTION ), get_option( CRDR_Sync::APART_OPTION ) ) ) );
+t( 'repair: nothing changes in the customer table until the next rebuild (and no lock is left behind)', array( $P2 ) === $mkeys() && null === $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", CRDR_Sync::LOCK_OPTION ) ) );
+t( 'repair: the next rebuild gives two customers, each with the opt-out (the second person inherits it: conservative, see docs)', 'done' === $mrebuild() && array( $P1, $P2 ) === $mkeys() && 'optout' === $mblocked( $P1 ) && 'optout' === $mblocked( $P2 ) );
+t( 'repair: the rules do NOT join them again on later rebuilds', 'done' === $mrebuild() && array( $P1, $P2 ) === $mkeys() && array() === get_option( CRDR_Sync::LINKS_OPTION ) );
+t( 'repair: the copied opt-out is recognisable (so an owner who is sure can remove it): its message is the copy note', 1 === (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM ' . CRDR_DB::contacts() . " WHERE kind = 'optout' AND ckey = %s AND message = %s", $P2, CRDR_DB::OPTOUT_COPY_NOTE ) ) );
+$r = CRDR_Sync::rejoin( array( $P1 ) );
+t( 'repair: rejoin() lifts the separation; the next rebuild joins them again by the rule', true === $r['ok'] && array() === get_option( CRDR_Sync::APART_OPTION ) && 'done' === $mrebuild() && array( $P2 ) === $mkeys() );
+
+// ---- 6. the remembered joins are written only while we own the lock
+$mreset();
+$seen = array();
+$hook = function ( $q ) use ( $wpdb, &$seen ) {
+	if ( preg_match( '/^(INSERT|UPDATE)/', $q ) && false !== strpos( $q, 'crdr_identity_links' ) && empty( $seen['took'] ) ) {
+		$seen['took'] = true;
+		$wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->options} SET option_value = %s WHERE option_name = %s", time() . ':the-taker', CRDR_Sync::LOCK_OPTION ) );
+	}
+	return $q;
+};
+add_filter( 'query', $hook );
+CRDR_Sync::start();
+$s = array( 'phase' => '' );
+for ( $k = 0; $k < 4; $k++ ) {
+	$s = CRDR_Sync::step();
+}
+remove_filter( 'query', $hook );
+t( 'integrity: a process whose lock was taken over right before it writes the remembered joins writes nothing (was: it wrote them)', ! empty( $seen['took'] ) && false === get_option( CRDR_Sync::LINKS_OPTION ) && false !== strpos( (string) $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", CRDR_Sync::LOCK_OPTION ) ), ':the-taker' ) );
+$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name = %s", CRDR_Sync::LOCK_OPTION ) );
+
+// ---- 7. a rebuild that was half way when this version was installed (orders imported without the evidence columns)
+$mreset();
+update_option( CRDR_Sync::LINKS_OPTION, array( $P1 => $P2 ), false );
+$optout( $P2 );
+CRDR_Sync::start();
+for ( $k = 0; $k < 6; $k++ ) {
+	$s = CRDR_Sync::step();
+	if ( 'finalize' === $s['phase'] ) {
+		break;
+	}
+}
+$wpdb->query( 'UPDATE ' . CRDR_DB::orders() . " SET uid = 0, email = ''" ); // what an older version wrote
+for ( $k = 0; $k < 4; $k++ ) {
+	$s = CRDR_Sync::step();
+}
+t( 'integrity: orders imported by the previous version (no evidence) are not an error; the remembered join still holds and the opt-out still reaches both keys', 'done' === $s['phase'] && array( $P2 ) === $mkeys() && 'optout' === $mblocked( $P1 ) && 'optout' === $mblocked( $P2 ) && array( $P1 => $P2 ) === get_option( CRDR_Sync::LINKS_OPTION ) );
+
+// ---- 8. a page drawn before a repair cannot act on the wrong customer afterwards
+$mreset();
+$mrebuild();
+$gid_old = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT id FROM ' . CRDR_DB::customers() . ' WHERE ckey = %s', $P2 ) );
+$tok_old = CRDR_Actions::identity( $P2 );
+CRDR_Sync::unjoin( array( $P2 ) ); // the owner separates the joined customer (the key everyone was joined to)
+$mrebuild();
+$id_p1 = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT id FROM ' . CRDR_DB::customers() . ' WHERE ckey = %s', $P1 ) );
+$before = (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . CRDR_DB::contacts() );
+$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $id_p1, 'k' => $tok_old, 'type' => 'called' ) );
+t( 'integrity: after a repair, the old page\'s token of the joined key cannot be used on the id of the OTHER customer: refused as stale, nothing written', false === $j['success'] && 'stale_customer' === ( $j['data']['code'] ?? '' ) && $before === (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . CRDR_DB::contacts() ) );
+foreach ( array( $P1, $P2 ) as $k ) {
+	$cid = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT id FROM ' . CRDR_DB::customers() . ' WHERE ckey = %s', $k ) );
+	$j   = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $cid, 'k' => $tok_old, 'type' => 'called' ) );
+	t( "integrity: the old token works only for the customer whose key it names ($k): " . ( $k === $P2 ? 'allowed' : 'refused' ), $k === $P2 ? true === $j['success'] : false === $j['success'] );
+}
+
+// ---- 9. a failure or a death at EVERY write of the finalize step, in-process and as a real dying process
+$mreset();
+foreach ( $mmade as $oid => $_ ) {
+	$o = wc_get_order( $oid );
+	if ( $o ) {
+		$o->delete( true );
+	}
+}
+$mmade = array();
+$p1 = $mo( '09121110001', 'x@example.test', 0, 100 );
+$p2 = $mo( '09122220002', 'x@example.test', 0, 10 );
+$r1 = $mo( '09123330001', 'u1@example.test', 77, 90 );
+$r2 = $mo( '09123330002', 'u2@example.test', 77, 20 );
+$un = $mo( '09125550001', 'solo@example.test', 0, 40 );
+$seed_contacts = function () use ( $optout, $wpdb ) {
+	$wpdb->query( 'TRUNCATE TABLE ' . CRDR_DB::contacts() );
+	$optout( 'p:09121110001' ); // the person with two phones opted out under the OLD phone
+	CRDR_DB::add_contact( 'p:09123330001', 'called', array( 'playbook' => 'manual' ) ); // the registered user: a call note under his old phone
+	CRDR_DB::add_contact( 'p:09125550001', 'optout', array( 'playbook' => 'manual' ) ); // an unrelated customer, opted out
+};
+$snap = function () use ( $wpdb ) {
+	return array(
+		'customers' => $wpdb->get_results( 'SELECT ckey, orders_count, total_spent, phone, email, user_id FROM ' . CRDR_DB::customers() . ' ORDER BY ckey', ARRAY_A ),
+		'orders'    => $wpdb->get_results( 'SELECT order_id, ckey FROM ' . CRDR_DB::orders() . ' ORDER BY order_id', ARRAY_A ),
+		'contacts'  => $wpdb->get_results( 'SELECT ckey, kind, status FROM ' . CRDR_DB::contacts() . ' ORDER BY ckey, kind, status, id', ARRAY_A ),
+		'links'     => get_option( CRDR_Sync::LINKS_OPTION ),
+	);
+};
+$to_finalize = function () {
+	CRDR_Sync::start();
+	for ( $k = 0; $k < 8; $k++ ) {
+		$s = CRDR_Sync::state( true );
+		if ( 'finalize' === $s['phase'] ) {
+			return true;
+		}
+		CRDR_Sync::step();
+	}
+	return false;
+};
+// ---- a database error is never skipped: not by the rebuild, and never "saved" for an opt-out that was not written
+$mreset();
+$dberr = function ( $match ) {
+	return function ( $q ) use ( $match ) {
+		static $done = false;
+		if ( ! $done && preg_match( $match, $q ) ) {
+			$done = true;
+			return 'SELECT * FROM crdr_simulated_database_error';
+		}
+		return $q;
+	};
+};
+CRDR_Sync::start();
+$f = $dberr( '/^INSERT INTO ' . preg_quote( CRDR_DB::customers(), '/' ) . '/' );
+add_filter( 'query', $f );
+$wpdb->suppress_errors( true );
+$s = CRDR_Sync::step(); // the first page: one customer row cannot be written
+$wpdb->suppress_errors( false );
+remove_filter( 'query', $f );
+t( 'errors: a database error while importing an order fails the rebuild (was: the order was silently skipped and the rebuild went on to "done")', 'failed' === $s['phase'] && true === CRDR_Sync::guard()['blocked'], wp_json_encode( $s ) );
+$mreset();
+$mrebuild();
+$gid = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT id FROM ' . CRDR_DB::customers() . ' WHERE ckey = %s', 'p:09125550001' ) );
+$f = $dberr( '/^INSERT INTO `?' . preg_quote( CRDR_DB::contacts(), '/' ) . '/' ); // ($wpdb->insert() quotes the table name)
+add_filter( 'query', $f );
+$wpdb->suppress_errors( true );
+$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $gid, 'type' => 'optout' ) );
+$wpdb->suppress_errors( false );
+remove_filter( 'query', $f );
+t( 'errors: "do not message" whose first row could not be written answers with an ERROR (was: "saved"); the key still ends up opted out (the person-wide copy loop writes it: the conservative direction)', false === $j['success'] && $count_kind( 'p:09125550001', 'optout' ) >= 1, wp_json_encode( $j, JSON_UNESCAPED_UNICODE ) );
+$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $gid, 'type' => 'optout' ) );
+t( 'errors: asking again answers "saved" (a repeated opt-out only adds a row)', true === $j['success'] && $count_kind( 'p:09125550001', 'optout' ) >= 1 );
+// the same, when EVERY write fails: nothing is recorded and the answer is an error
+$f = function ( $q ) {
+	return preg_match( '/^INSERT INTO `?' . preg_quote( CRDR_DB::contacts(), '/' ) . '/', $q ) ? 'SELECT * FROM crdr_simulated_database_error' : $q;
+};
+$wpdb->query( 'TRUNCATE TABLE ' . CRDR_DB::contacts() );
+add_filter( 'query', $f );
+$wpdb->suppress_errors( true );
+$j = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $gid, 'type' => 'optout' ) );
+$j2 = crdr_t_ajax( array( 'CRDR_Actions', 'ajax_contact' ), array( 'id' => $gid, 'type' => 'called' ) );
+$wpdb->suppress_errors( false );
+remove_filter( 'query', $f );
+t( 'errors: when the database refuses every write, "do not message" and "called" both answer with an ERROR and record nothing', false === $j['success'] && false === $j2['success'] && 0 === (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . CRDR_DB::contacts() ) );
+
+$opted_keys = array( 'p:09121110001', 'p:09125550001' ); // the keys that are opted out BEFORE the rebuild: they must stay blocked at every moment
+$joined_key = 'p:09122220002'; // the new phone of the opted-out person: blocked as soon as it carries the merged customer (or anything of it)
+$seed_contacts();
+$mreset_keep = function () use ( $mreset, $seed_contacts ) {
+	$mreset();
+	$seed_contacts();
+};
+$mreset_keep();
+t( 'boundaries: (setup) the scenario reaches the finalize phase', $to_finalize() );
+$w = crdr_t_parallel( array( array( 'identity_die', '0' ) ), 2 ); // counts the writes of the finalize step without dying
+$N = isset( $w[0]['writes'] ) ? (int) $w[0]['writes'] : 0;
+t( 'boundaries: the finalize step of the scenario makes a known number of writes (' . $N . '); each one is tried below', $N >= 8 && 'stats' === ( $w[0]['phase'] ?? '' ), wp_json_encode( $w ) );
+$mreset_keep();
+$mrebuild();
+$ref = $snap();
+t( 'boundaries: the clean run has the expected result (3 people joined into 2, 5 orders in 3 customers, the opt-out reaches both phones)', 3 === count( $ref['customers'] ) && 'optout' === $mblocked( 'p:09121110001' ) && 'optout' === $mblocked( 'p:09122220002' ), wp_json_encode( $ref['customers'] ) );
+$bad = array();
+$release_lock_after_ttl = function () use ( $wpdb ) { // a failed unlock leaves the lock row: it frees itself after LOCK_TTL; simulate that time passing
+	$cur = $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", CRDR_Sync::LOCK_OPTION ) );
+	if ( $cur ) {
+		$wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->options} SET option_value = %s WHERE option_name = %s", ( time() - CRDR_Sync::LOCK_TTL - 5 ) . ':' . substr( $cur, strpos( $cur, ':' ) + 1 ), CRDR_Sync::LOCK_OPTION ) );
+	}
+};
+for ( $k = 1; $k <= $N; $k++ ) {
+	foreach ( array( 'dberror', 'death' ) as $how ) {
+		$mreset_keep();
+		$to_finalize();
+		if ( 'dberror' === $how ) {
+			$n    = 0;
+			$seen = false;
+			$f    = function ( $q ) use ( $k, &$n, &$seen ) { // the k-th write of the step is replaced by an invalid statement: wpdb->query() returns false, as on a deadlock or a full disk
+				if ( false !== strpos( $q, 'SELECT ckey, uid, email FROM' ) ) {
+					$seen = true;
+				}
+				if ( $seen && preg_match( '/^\s*(INSERT|UPDATE|DELETE)/i', $q ) && ++$n === $k ) {
+					return 'SELECT * FROM crdr_simulated_database_error';
+				}
+				return $q;
+			};
+			add_filter( 'query', $f );
+			$wpdb->suppress_errors( true );
+			$s = CRDR_Sync::step();
+			$wpdb->suppress_errors( false );
+			remove_filter( 'query', $f );
+		} else {
+			crdr_t_parallel( array( array( 'identity_die', (string) $k ) ), 2 );
+		}
+		$problems = array();
+		$st       = CRDR_Sync::state( true );
+		if ( ! CRDR_Sync::guard()['blocked'] ) {
+			$problems[] = 'sending was not blocked (phase ' . $st['phase'] . ')';
+		}
+		if ( ! in_array( $st['phase'], array( 'failed', 'finalize', 'stats' ), true ) ) {
+			$problems[] = 'unexpected phase ' . $st['phase'];
+		}
+		foreach ( $opted_keys as $key ) { // the invariant: nobody opted out can be messaged, at any point, under any of their keys
+			if ( 'optout' !== $mblocked( $key ) ) {
+				$problems[] = "$key not opted out";
+			}
+		}
+		$merged = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT orders_count FROM ' . CRDR_DB::customers() . ' WHERE ckey = %s', $joined_key ) );
+		if ( $merged >= 2 && 'optout' !== $mblocked( $joined_key ) ) { // a customer that carries the opted-out person's orders is opted out
+			$problems[] = 'the merged customer is not opted out';
+		}
+		$release_lock_after_ttl();
+		// the next step: either it fails the rebuild (found half applied), or finishes the idempotent work
+		$s2 = CRDR_Sync::step();
+		// (at the very last write, the release of the lock, all the work is already done: the next step then legitimately reaches "done")
+		if ( ! in_array( $s2['phase'], array( 'failed', 'stats', 'done' ), true ) || ( in_array( $s2['phase'], array( 'stats', 'done' ), true ) && 'failed' === $st['phase'] ) ) {
+			$problems[] = 'next step gave ' . $s2['phase'];
+		}
+		foreach ( $opted_keys as $key ) {
+			if ( 'optout' !== $mblocked( $key ) ) {
+				$problems[] = "$key not opted out after the next step";
+			}
+		}
+		$merged = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT orders_count FROM ' . CRDR_DB::customers() . ' WHERE ckey = %s', $joined_key ) );
+		if ( $merged >= 2 && 'optout' !== $mblocked( $joined_key ) ) {
+			$problems[] = 'the merged customer is not opted out after the next step';
+		}
+		// recovery: a new rebuild ends "done" and equals the clean run
+		$release_lock_after_ttl();
+		if ( 'done' !== $mrebuild() ) {
+			$problems[] = 'recovery rebuild did not finish';
+		} elseif ( $snap() !== $ref ) {
+			$problems[] = 'recovery result differs from the clean run';
+		}
+		if ( $problems ) {
+			$bad[ "$how@$k" ] = $problems;
+		}
+	}
+}
+t( 'boundaries: a database error (the write returns false) and a death (separate process, exit) at EACH of the ' . $N . ' writes of the finalize step: sending stays blocked, every opted-out key stays opted out at every moment, the next step fails the rebuild or finishes it, and a new rebuild always ends exactly like the clean run', array() === $bad, wp_json_encode( $bad ) );
+
+// ---- clean up
+foreach ( $mmade as $oid => $_ ) {
+	$o = wc_get_order( $oid );
+	if ( $o ) {
+		$o->delete( true );
+	}
+}
+foreach ( array( CRDR_Sync::LINKS_OPTION, CRDR_Sync::APART_OPTION, CRDR_Sync::STATE_OPTION, CRDR_Sync::LOCK_OPTION ) as $opt ) {
+	delete_option( $opt );
+}
+crdr_t_reset( 0 );
+
+
+/* ============================ N. the database step gives EXACTLY the answer of the resolver on all the data (random stores) ============================ */
+echo "== identity step equals the full resolver on random data\n";
+foreach ( array( CRDR_Sync::LINKS_OPTION, CRDR_Sync::APART_OPTION, CRDR_Sync::STATE_OPTION, CRDR_Sync::LOCK_OPTION ) as $opt ) {
+	delete_option( $opt );
+}
+$lk = new ReflectionMethod( 'CRDR_Sync', 'lock' );
+$lk->setAccessible( true );
+$rs = new ReflectionMethod( 'CRDR_Sync', 'resolve_identities' );
+$rs->setAccessible( true );
+$all_ok     = true;
+$stable     = true;
+$mismatches = array();
+$joined_sum = 0;
+$refused_sum = 0;
+$shared_sum = 0;
+foreach ( array( 11, 22, 33, 44, 55, 66 ) as $seed ) {
+	mt_srand( $seed );
+	foreach ( array( CRDR_DB::customers(), CRDR_DB::orders(), CRDR_DB::contacts() ) as $tb ) {
+		$wpdb->query( 'TRUNCATE TABLE ' . $tb );
+	}
+	delete_option( CRDR_Sync::LINKS_OPTION );
+	$N = 1200; $oid = 0; $cv = array(); $ov = array();
+	$pool = 150 + $seed * 3; // a small pool of emails: lots of sharing
+	$accounts = 60 + $seed; // a small pool of accounts
+	for ( $i = 1; $i <= $N; $i++ ) {
+		$kind = mt_rand( 1, 100 );
+		$email0 = mt_rand( 1, 100 ) <= 35 ? 'shared' . mt_rand( 1, $pool ) . '@example.test' : 'own' . $i . '@example.test';
+		if ( $kind <= 70 ) {
+			$key = 'p:09' . str_pad( (string) $i, 9, '0', STR_PAD_LEFT );
+		} elseif ( $kind <= 85 ) {
+			$key = 'e:' . $email0;
+		} elseif ( $kind <= 90 ) {
+			$key = 'u:' . ( 100000 + $i );
+		} else {
+			$key = 'o:' . ( 500000 + $i );
+		}
+		if ( isset( $seen_keys[ $seed ][ $key ] ) ) {
+			continue;
+		}
+		$seen_keys[ $seed ][ $key ] = true;
+		$uid = mt_rand( 1, 100 ) <= 40 ? mt_rand( 1, $accounts ) : 0;
+		if ( 0 === strpos( $key, 'u:' ) ) {
+			$uid = 100000 + $i;
+		}
+		$ts = 1700000000 + mt_rand( 0, 90000000 );
+		$k  = mt_rand( 1, 3 );
+		$cv[] = $wpdb->prepare( '(%s,%d,%s,%s,%s,%d,%f,%d,%d)', $key, $uid, 'c' . $i, 0 === strpos( $key, 'p:' ) ? substr( $key, 2 ) : '', 0 === strpos( $key, 'e:' ) ? substr( $key, 2 ) : $email0, $k, 1000 * $k, $ts - 100000, $ts );
+		for ( $r = 0; $r < $k; $r++ ) {
+			$u = $uid && mt_rand( 1, 100 ) <= 12 ? mt_rand( 1, $accounts ) : $uid; // a few orders carry a second account
+			$e = 0 === strpos( $key, 'e:' ) ? substr( $key, 2 ) : ( 'o:' === substr( $key, 0, 2 ) ? '' : ( $r && mt_rand( 1, 100 ) <= 30 ? 'shared' . mt_rand( 1, $pool ) . '@example.test' : $email0 ) );
+			if ( 'o:' === substr( $key, 0, 2 ) ) { $u = 0; }
+			$ov[] = $wpdb->prepare( '(%d,%s,%d,%f,%d,%d,%s)', ++$oid, $key, $ts - $r * 86400, 1000, 1, $u, $e );
+		}
+	}
+	$wpdb->query( 'INSERT INTO ' . CRDR_DB::customers() . ' (ckey,user_id,name,phone,email,orders_count,total_spent,first_ts,last_ts) VALUES ' . implode( ',', $cv ) );
+	foreach ( array_chunk( $ov, 1000 ) as $chunk ) {
+		$wpdb->query( 'INSERT INTO ' . CRDR_DB::orders() . ' (order_id,ckey,ts,net,items,uid,email) VALUES ' . implode( ',', $chunk ) );
+	}
+	// the reference: the pure resolver on ALL customers and ALL evidence
+	$clusters = array();
+	foreach ( $wpdb->get_results( 'SELECT ckey, last_ts FROM ' . CRDR_DB::customers(), ARRAY_A ) as $r ) {
+		$clusters[ $r['ckey'] ] = (int) $r['last_ts'];
+	}
+	$evidence = $wpdb->get_results( 'SELECT ckey, uid, email FROM ' . CRDR_DB::orders() . ' GROUP BY ckey, uid, email', ARRAY_N );
+	$ref      = CRDR_Identity::resolve( $clusters, $evidence );
+	$orders_before = $wpdb->get_results( 'SELECT order_id, ckey FROM ' . CRDR_DB::orders() . ' ORDER BY order_id', OBJECT_K );
+	$tot_orders    = (int) $wpdb->get_var( 'SELECT SUM(orders_count) FROM ' . CRDR_DB::customers() );
+	$lock = $lk->invoke( null );
+	$s    = $rs->invoke( null, array( 'phase' => 'finalize', 'page' => 1, 'total' => 0, 'done' => 0, 'inflight' => 0 ) );
+	CRDR_Sync::unlock( $lock );
+	$want_keys = array_values( array_diff( array_keys( $clusters ), array_keys( $ref['map'] ) ) );
+	sort( $want_keys );
+	$got_keys = $wpdb->get_col( 'SELECT ckey FROM ' . CRDR_DB::customers() );
+	sort( $got_keys );
+	$orders_ok = true;
+	foreach ( $wpdb->get_results( 'SELECT order_id, ckey FROM ' . CRDR_DB::orders(), ARRAY_A ) as $row ) {
+		$old  = $orders_before[ $row['order_id'] ]->ckey;
+		$want = isset( $ref['map'][ $old ] ) ? $ref['map'][ $old ] : $old;
+		if ( $row['ckey'] !== $want ) {
+			$orders_ok = false;
+			break;
+		}
+	}
+	$sum_ok = $tot_orders === (int) $wpdb->get_var( 'SELECT SUM(orders_count) FROM ' . CRDR_DB::customers() );
+	$links_ok = $ref['links'] === get_option( CRDR_Sync::LINKS_OPTION, array() );
+	$rep_ok = (int) $s['identity']['joined'] === (int) $ref['report']['joined'] && (int) $s['identity']['people'] === (int) $ref['report']['people'] && (int) $s['identity']['refused'] === (int) $ref['report']['refused'];
+	if ( $want_keys !== $got_keys || ! $orders_ok || ! $sum_ok || ! $links_ok || ! $rep_ok ) {
+		$all_ok = false;
+		$mismatches[ $seed ] = array( 'keys' => $want_keys === $got_keys, 'orders' => $orders_ok, 'sum' => $sum_ok, 'links' => $links_ok, 'report' => $rep_ok );
+	}
+	$joined_sum  += (int) $ref['report']['joined'];
+	$refused_sum += (int) $ref['report']['refused'];
+	$shared_sum  += (int) $ref['report']['emails_shared'] + (int) $ref['report']['emails_contested'];
+	// a NEW rebuild of the same data (everything imported again, provisional keys again) with the remembered joins gives the same people
+	$first_keys  = $got_keys;
+	$first_links = get_option( CRDR_Sync::LINKS_OPTION, array() );
+	foreach ( array( CRDR_DB::customers(), CRDR_DB::orders() ) as $tb ) {
+		$wpdb->query( 'TRUNCATE TABLE ' . $tb );
+	}
+	$wpdb->query( 'INSERT INTO ' . CRDR_DB::customers() . ' (ckey,user_id,name,phone,email,orders_count,total_spent,first_ts,last_ts) VALUES ' . implode( ',', $cv ) );
+	foreach ( array_chunk( $ov, 1000 ) as $chunk ) {
+		$wpdb->query( 'INSERT INTO ' . CRDR_DB::orders() . ' (order_id,ckey,ts,net,items,uid,email) VALUES ' . implode( ',', $chunk ) );
+	}
+	$lock = $lk->invoke( null );
+	$rs->invoke( null, array( 'phase' => 'finalize', 'page' => 1, 'total' => 0, 'done' => 0, 'inflight' => 0 ) );
+	CRDR_Sync::unlock( $lock );
+	$again_keys = $wpdb->get_col( 'SELECT ckey FROM ' . CRDR_DB::customers() );
+	sort( $again_keys );
+	if ( $again_keys !== $first_keys || $first_links !== get_option( CRDR_Sync::LINKS_OPTION, array() ) ) {
+		$stable = false;
+		$mismatches[ "$seed-rebuild" ] = array( 'keys' => $again_keys === $first_keys );
+	}
+}
+t( 'random stores: the database step (loads only the joinable customers, writes in batches) ends with EXACTLY the customers, order keys, order totals, remembered joins and counts that the resolver gives on all the data', $all_ok, wp_json_encode( $mismatches ) );
+t( 'random stores: the test is not trivial (it joined hundreds of customers, hit shared / contested emails, and refused joins of two accounts)', $joined_sum > 200 && $shared_sum > 10 && $refused_sum >= 1, wp_json_encode( array( $joined_sum, $shared_sum, $refused_sum ) ) );
+t( 'random stores: a new rebuild of the same data (re-imported, with the remembered joins) gives exactly the same people and the same remembered joins (repeatable rebuilds)', $stable, wp_json_encode( $mismatches ) );
+foreach ( array( CRDR_DB::customers(), CRDR_DB::orders(), CRDR_DB::contacts() ) as $tb ) {
+	$wpdb->query( 'TRUNCATE TABLE ' . $tb );
+}
+foreach ( array( CRDR_Sync::LINKS_OPTION, CRDR_Sync::STATE_OPTION, CRDR_Sync::LOCK_OPTION ) as $opt ) {
+	delete_option( $opt );
+}
 
 /* ----------------------------------------------------------------- done */
 printf( "\nphase 1 safety: %d passed, %d failed\n", $GLOBALS['P'], $GLOBALS['F'] );

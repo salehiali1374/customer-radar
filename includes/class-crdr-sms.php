@@ -3,7 +3,10 @@ defined( 'ABSPATH' ) || exit;
 
 /**
  * Sends SMS through the free "Persian WooCommerce SMS" plugin when it is active,
- * or directly through Kavenegar. Returns array( bool ok, string error ).
+ * or directly through Kavenegar (the recipient's phone number and the message text are sent to that service).
+ *
+ * deliver() is the only way to send, and its only caller is CRDR_Send::send_claimed(), which claims the customer, re-checks the
+ * rebuild guard and the opt-out, and records the outcome. (An older two-value send() wrapper that skipped all of that was removed.)
  */
 class CRDR_SMS {
 
@@ -33,19 +36,6 @@ class CRDR_SMS {
 	}
 
 	/**
-	 * Legacy two-value form of deliver(): an uncertain outcome counts as "not ok" here, so callers that
-	 * cannot tell the difference must treat it as failed. Campaign sending uses deliver() directly.
-	 *
-	 * @param string $phone   09xxxxxxxxx
-	 * @param string $message
-	 * @return array [ bool $ok, string $error ]
-	 */
-	public static function send( $phone, $message ) {
-		$r = self::deliver( $phone, $message );
-		return array( 'sent' === $r['state'], $r['error'] );
-	}
-
-	/**
 	 * Send one SMS and say what we actually know about the result.
 	 *
 	 * state:
@@ -60,7 +50,7 @@ class CRDR_SMS {
 	 *   message    this text was refused              -> set aside until the text/settings are saved
 	 *   fatal      account, key, credit, request      -> stop the run, nobody is penalised
 	 *   gateway    network problem before the request left -> circuit breaker after three in a row, nobody penalised
-	 *   uncertain  failed without saying why          -> set aside for a while, counts for the circuit breaker
+	 *   rate       the provider is throttling this server -> the run stops at once, nobody penalised, tried again at the next run
 	 * The error text is our own wording, with keys and phone numbers removed: never the provider's raw answer.
 	 *
 	 * @param string $localid numeric id passed to Kavenegar so that a repeated request is recognised
@@ -113,13 +103,22 @@ class CRDR_SMS {
 			return self::result( 'sent' );
 		}
 		if ( is_string( $r ) && '' !== $r ) {
-			// That plugin only reports a text; treat a timeout-like text as uncertain, anything else as a plain failure.
-			if ( preg_match( '/time(d)?[ -]?out|cURL error (28|52|56)/i', $r ) ) {
+			// That plugin catches its gateway's exceptions and returns their text, so a text says only that SOMETHING went wrong, not WHEN: a
+			// timeout, a parse error after the gateway already accepted the message, a refusal. Retrying could send the SMS twice, so only the
+			// two answers that plugin gives BEFORE it calls any gateway are "nothing was sent"; every other text is "unknown" (never retried).
+			$t = trim( $r );
+			if ( 'شماره موبایل خالی/نامعتبر است.' === $t ) {
+				return self::result( 'failed', 'افزونه پیامک ووکامرس شماره‌ی گیرنده را خالی یا نامعتبر دانست.', 'recipient' );
+			}
+			if ( 'متن پیامک خالی است.' === $t ) {
+				return self::result( 'failed', 'افزونه پیامک ووکامرس متن پیامک را خالی دانست.', 'message' );
+			}
+			if ( preg_match( '/time(d)?[ -]?out|cURL error (28|52|56)/i', $t ) ) {
 				return self::result( 'unknown', self::unknown_text( 'زمان انتظار افزونه پیامک ووکامرس تمام شد' ) );
 			}
-			// A text only: it cannot tell a bad number from a broken account, so it is "uncertain" (a bounded set-aside).
-			// The other plugin's wording is not copied (it may contain anything); the owner is pointed to where it is shown.
-			return self::result( 'failed', 'افزونه پیامک ووکامرس خطا برگرداند؛ علتش را در تنظیمات یا گزارش همان افزونه ببینید.', 'uncertain' );
+			// The administrator sees a masked excerpt (no links, keys, long tokens or phone numbers) to tell what happened in that plugin's own log.
+			// (A short sentence, not unknown_text(): the error column holds 255 characters and the excerpt must fit; the full explanation is shown by the status.)
+			return self::result( 'unknown', 'ممکن است پیامک رفته باشد و دوباره فرستاده نمی‌شود. پاسخ متنی افزونه پیامک ووکامرس: «' . CRDR_Send_Rules::safe_excerpt( $t, array( CRDR_Settings::get( 'kavenegar_key' ) ), 70 ) . '»' );
 		}
 		return self::result( 'unknown', self::unknown_text( 'پاسخ نامشخص از افزونه پیامک ووکامرس' ) );
 	}

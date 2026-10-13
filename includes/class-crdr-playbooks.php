@@ -14,6 +14,9 @@ class CRDR_Playbooks {
 	const HOURLY     = 'crdr_hourly';
 	const LOCK       = 'crdr_pb_lock';
 
+	/** What sent_today() answers when the database could not count: more than any daily cap (max 500), so nothing more is sent. */
+	const CAP_UNKNOWN = 1000000000;
+
 	/* ---------------------------------------------------------------- catalog */
 
 	public static function defaults() {
@@ -131,6 +134,7 @@ class CRDR_Playbooks {
 		return array(
 			'offer' => isset( $pb['offer']['type'] ) && 'percent' === $pb['offer']['type'],
 			'reco'  => ! empty( $pb['cross_sell'] ),
+			'require_optout' => true, // campaigns are promotional: the opt-out phrase is mandatory
 		);
 	}
 
@@ -298,23 +302,62 @@ class CRDR_Playbooks {
 	public static function sent_today( $id ) {
 		global $wpdb;
 		$start = ( new DateTime( 'today', wp_timezone() ) )->getTimestamp();
-		return (int) $wpdb->get_var( $wpdb->prepare(
+		$n     = $wpdb->get_var( $wpdb->prepare(
 			"SELECT COUNT(*) FROM " . CRDR_DB::contacts() . " WHERE playbook = %s AND kind = 'sms' AND grp = 'treated' AND status IN ('ok','pending','unknown') AND created_ts >= %d", // phpcs:ignore WordPress.DB.PreparedSQL
 			$id,
 			$start
 		) );
+		// A count that could not be read is NOT zero: zero would hand out the whole daily cap again. It fails closed (CAP_UNKNOWN is far above any cap).
+		if ( null === $n || $wpdb->last_error ) {
+			return self::CAP_UNKNOWN;
+		}
+		return (int) $n;
+	}
+
+	/** What to show as "sent today": the count, or 0 when it could not be read (the callers then block; see sent_today()). */
+	public static function today_shown( $id ) {
+		$n = self::sent_today( $id );
+		return self::CAP_UNKNOWN === $n ? 0 : $n;
 	}
 
 	public static function cap_left( $id, array $pb ) {
 		return max( 0, (int) $pb['daily_cap'] - self::sent_today( $id ) );
 	}
 
-	/** Deterministic, monthly-rotating holdout assignment. */
+	/**
+	 * The campaign WAVE a moment belongs to: the calendar month in the site's timezone ("2026-10"). Filterable (crdr_campaign_wave).
+	 * Inside one wave a customer's holdout assignment never changes; a new wave draws again.
+	 */
+	public static function wave( $ts = null ) {
+		return (string) apply_filters( 'crdr_campaign_wave', null === $ts ? wp_date( 'Y-m' ) : wp_date( 'Y-m', (int) $ts ), $ts );
+	}
+
+	/** Deterministic holdout assignment, stable within a wave (and rotating between waves, so that nobody is held out for ever). */
 	public static function is_holdout( $ckey, $id, $pct ) {
 		if ( $pct <= 0 ) {
 			return false;
 		}
-		return ( crc32( $ckey . '|' . $id . '|' . wp_date( 'Y-m' ) ) % 100 ) < $pct;
+		return ( crc32( $ckey . '|' . $id . '|' . self::wave() ) % 100 ) < $pct;
+	}
+
+	/**
+	 * Was this customer ASSIGNED to the holdout of this campaign less than `window_days` ago (counted from the first time)? Then the customer stays out
+	 * of the campaign until that measurement window is over, whatever the new wave's draw says: a held-out customer who got a message inside their own
+	 * measurement window would be a contaminated control. After the window the customer can be drawn again (and then counts from that first row only).
+	 *
+	 * @return bool|null null when the database could not answer (the caller must not message: see run_claimed)
+	 */
+	public static function held_out_recently( $ckey, $id, $window_days ) {
+		global $wpdb;
+		$first = $wpdb->get_var( $wpdb->prepare(
+			'SELECT MIN(created_ts) FROM ' . CRDR_DB::contacts() . " WHERE playbook = %s AND ckey = %s AND kind = 'sms' AND grp = 'holdout' AND status = 'holdout'", // phpcs:ignore WordPress.DB.PreparedSQL
+			$id,
+			$ckey
+		) );
+		if ( $wpdb->last_error ) {
+			return null;
+		}
+		return null !== $first && (int) $first >= time() - (int) $window_days * DAY_IN_SECONDS;
 	}
 
 	/** Number of SMS parts a Persian text uses (70 chars single, 67 per part when split). */
@@ -387,6 +430,26 @@ class CRDR_Playbooks {
 		if ( ! $pb ) {
 			return null;
 		}
+		$sync = CRDR_Sync::send_guard();
+		if ( $sync['blocked'] ) { // same shape as the real answer, but the customer table is not read at all
+			return array(
+				'audience'        => 0,
+				'aov'             => 0.0,
+				'cap'             => (int) $pb['daily_cap'],
+				'today'           => self::today_shown( $id ),
+				'holdout'         => (int) $pb['holdout_pct'],
+				'samples'         => array(),
+				'scenario'        => CRDR_Stats::scenario( 0, 0, (array) $pb['scenario'] ),
+				'in_window'       => self::in_send_window(),
+				'provider'        => CRDR_SMS::provider_label(),
+				'mode'            => $pb['mode'],
+				'template_errors' => self::template_errors( $pb ),
+				'blocked'         => $sync['code'],
+				'blocked_message' => $sync['message'],
+				'can_override'    => false,
+				'site_warning'    => CRDR_Site::warning(),
+			);
+		}
 		$f    = self::filter( $pb );
 		$sum  = CRDR_Audience::summary( $f );
 		$rows = $wpdb->get_results( 'SELECT * FROM ' . CRDR_DB::customers() . ' c ' . CRDR_Audience::where( $f ) . ' ORDER BY c.priority DESC, c.total_spent DESC LIMIT 3', ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL
@@ -403,11 +466,12 @@ class CRDR_Playbooks {
 		$in_window = self::in_send_window();
 		// What would a manual click do right now (without the explicit override)? The server decides again on every run.
 		$gate = CRDR_Send_Rules::gate( $pb['mode'], 'manual', $in_window, false, false );
+		$today_known = self::CAP_UNKNOWN !== self::sent_today( $id );
 		return array(
 			'audience'        => $sum['n'],
 			'aov'             => $sum['aov'],
 			'cap'             => (int) $pb['daily_cap'],
-			'today'           => self::sent_today( $id ),
+			'today'           => self::today_shown( $id ),
 			'holdout'         => (int) $pb['holdout_pct'],
 			'samples'         => $samples,
 			'scenario'        => CRDR_Stats::scenario( $take, $sum['aov'], (array) $pb['scenario'] ),
@@ -415,9 +479,10 @@ class CRDR_Playbooks {
 			'provider'        => CRDR_SMS::provider_label(),
 			'mode'            => $pb['mode'],
 			'template_errors' => self::template_errors( $pb ),
-			'blocked'         => $gate['allowed'] ? '' : $gate['code'],
-			'blocked_message' => $gate['allowed'] ? '' : CRDR_Send_Rules::gate_message( $gate['code'] ),
-			'can_override'    => ( 'outside_window' === $gate['code'] ) && CRDR_Send::can_override_window(),
+			'blocked'         => ! $today_known ? 'db_error' : ( $gate['allowed'] ? '' : $gate['code'] ),
+			'blocked_message' => ! $today_known ? CRDR_Health::message( 'db_error' ) : ( $gate['allowed'] ? '' : CRDR_Send_Rules::gate_message( $gate['code'] ) ),
+			'can_override'    => $today_known && ( 'outside_window' === $gate['code'] ) && CRDR_Send::can_override_window(),
+			'site_warning'    => CRDR_Site::warning(),
 		);
 	}
 
@@ -430,6 +495,7 @@ class CRDR_Playbooks {
 	 * The server decides whether the run is allowed (campaign mode + sending hours); the UI only mirrors that.
 	 *
 	 * @param array $opts trigger: 'manual' (default, a person pressed run) | 'cron';
+ *                    site_ack: the one-time token CRDR_Site issued with the preview (manual runs on a site that is not the recorded one only);
 	 *                    override_window: ask to send outside the allowed hours (manual only, needs the
 	 *                    'manage_options' capability, and is recorded in the run log)
 	 * @return array sent, held_out, skipped, failed, unknown, left (remaining daily cap), error, blocked (reason code)
@@ -464,6 +530,27 @@ class CRDR_Playbooks {
 			}
 			return $res;
 		};
+		// A copy of the shop (staging, local, a restored backup on another address) must not send the real shop's campaigns by itself.
+		//  - Anything that is not a person pressing the button (cron, an unknown trigger) is refused outright and never accepts a token.
+		//  - A manual run on such a site needs an Administrator holding the one-time token the preview issued for this campaign (CRDR_Site);
+		//    that is checked here, on the server, and spent below once every other guard has passed. Every other guard still applies.
+		$ack_scope = 'pb:' . $id;
+		if ( 'manual' !== $opts['trigger'] ) {
+			$site = CRDR_Site::status();
+			if ( ! $site['ok'] ) {
+				return $block( 'site_changed', CRDR_Site::message( $site ) );
+			}
+		} else {
+			$why = CRDR_Site::manual_block( $ack_scope, isset( $opts['site_ack'] ) ? $opts['site_ack'] : '' );
+			if ( '' !== $why ) {
+				return $block( 'site_unconfirmed', $why );
+			}
+		}
+		// Customer data being rebuilt, or a rebuild that stopped half way: no campaign may select or message anybody.
+		$sync = CRDR_Sync::send_guard();
+		if ( $sync['blocked'] ) {
+			return $block( $sync['code'], $sync['message'] );
+		}
 		if ( ! $gate['allowed'] ) {
 			return $block( $gate['code'], CRDR_Send_Rules::gate_message( $gate['code'] ) );
 		}
@@ -473,6 +560,19 @@ class CRDR_Playbooks {
 		$problems = self::template_errors( $pb );
 		if ( $problems ) {
 			return $block( 'template', 'متن پیام این کمپین معتبر نیست و پیامی ارسال نشد: ' . $problems[0] );
+		}
+		$problems = CRDR_Settings::optout_errors( CRDR_Settings::all() ); // the phrase {optout} becomes: empty means "no way to stop the messages"
+		if ( $problems ) {
+			return $block( 'template', $problems[0] . ' پیامی ارسال نشد.' );
+		}
+		// The plugin's tables must be complete (a missing column or the unique claim index would make "no duplicate send" untrue).
+		$schema = CRDR_DB::ensure_schema();
+		if ( $schema ) {
+			return $block( 'schema', CRDR_DB::schema_message( $schema ) );
+		}
+		// Everything else allows the run: spend the site acknowledgement now (no-op when the site is the recorded one).
+		if ( 'manual' === $opts['trigger'] && ! CRDR_Site::consume_ack( $ack_scope, isset( $opts['site_ack'] ) ? $opts['site_ack'] : '' ) ) {
+			return $block( 'site_unconfirmed', 'تأییدیه‌ی ارسال از این سایت معتبر نیست یا هم‌اکنون استفاده شده است. پیش‌نمایش را دوباره باز کنید. پیامکی فرستاده نشد.' );
 		}
 		$lock = CRDR_Send::run_lock( $id );
 		if ( 'busy' === $lock ) {
@@ -484,6 +584,14 @@ class CRDR_Playbooks {
 			if ( 'got' === $lock ) {
 				CRDR_Send::run_unlock( $id );
 			}
+		}
+		if ( in_array( $res['blocked'], array( 'db_error', 'schema' ), true ) ) { // the database failed while the run was going: not "0 customers", a problem to show
+			if ( 'manual' === $entry['trigger'] ) {
+				CRDR_Send::log_run( $entry + array( 'result' => 'blocked:' . $res['blocked'], 'counts' => array_intersect_key( $res, array_flip( array( 'sent', 'held_out', 'skipped', 'failed', 'unknown' ) ) ) ) );
+			} else {
+				CRDR_Health::record_block( $id, $res['blocked'] );
+			}
+			return $res;
 		}
 		CRDR_Send::log_run( $entry + array(
 			'result' => 'ran',
@@ -499,6 +607,11 @@ class CRDR_Playbooks {
 	private static function run_claimed( $id, array $pb, $limit, $run_id, array $res ) {
 		global $wpdb;
 		CRDR_Send::recover_stale();
+		if ( self::CAP_UNKNOWN === self::sent_today( $id ) ) { // the daily count could not be read: that is not "0 sent today"
+			$res['error']   = CRDR_Health::message( 'db_error' );
+			$res['blocked'] = 'db_error';
+			return $res;
+		}
 		$left        = self::cap_left( $id, $pb );
 		$res['left'] = $left;
 		if ( $left <= 0 ) {
@@ -510,6 +623,11 @@ class CRDR_Playbooks {
 			'SELECT * FROM ' . CRDR_DB::customers() . ' c ' . CRDR_Audience::where( self::filter( $pb ) ) . ' AND ' . CRDR_Send::not_set_aside_sql( $id ) . ' ORDER BY c.priority DESC, c.total_spent DESC LIMIT %d', // phpcs:ignore WordPress.DB.PreparedSQL
 			$take * 2
 		), ARRAY_A );
+		if ( $wpdb->last_error ) { // an unreadable audience is NOT an empty audience: say so instead of "nobody to message"
+			$res['error']   = CRDR_Health::message( 'db_error' );
+			$res['blocked'] = 'db_error';
+			return $res;
+		}
 		$streak   = 0; // build failures / refused texts in a row: probably a general cause
 		$gw_fails = 0; // failures in a row that say nothing about the customer (network, unexplained): the circuit breaker
 
@@ -527,10 +645,31 @@ class CRDR_Playbooks {
 				}
 			}
 			$holdout = self::is_holdout( $cust['ckey'], $id, (int) $pb['holdout_pct'] );
+			if ( ! $holdout && (int) $pb['holdout_pct'] > 0 ) { // a control stays a control for the length of their measurement window
+				$sticky = self::held_out_recently( $cust['ckey'], $id, (int) $pb['window_days'] );
+				if ( null === $sticky ) { // cannot tell: do not message (a contaminated control is worse than a late message)
+					$res['error']   = CRDR_Health::message( 'db_error' );
+					$res['blocked'] = 'db_error';
+					break;
+				}
+				$holdout = $sticky;
+			}
 			$claim   = CRDR_Send::claim( $cust['ckey'], $id, $run_id, $holdout ? 'holdout' : 'treated', $cooldown );
 			if ( isset( $claim['skip'] ) ) {
+				if ( 'syncing' === $claim['skip'] ) { // a rebuild started while this run was going: stop at once.
+					$sync           = CRDR_Sync::send_guard();
+					$res['error']   = $sync['message'];
+					$res['blocked'] = $sync['code'] ? $sync['code'] : 'sync_running';
+					break;
+				}
 				if ( 'error' === $claim['skip'] ) { // cannot record the claim -> cannot guarantee "no duplicate": stop.
-					$res['error'] = 'ثبت وضعیت ارسال ممکن نشد؛ برای جلوگیری از پیام تکراری، اجرا متوقف شد.';
+					$res['error']   = 'ثبت وضعیت ارسال ممکن نشد؛ برای جلوگیری از پیام تکراری، اجرا متوقف شد. ' . CRDR_Health::message( 'db_error' );
+					$res['blocked'] = 'db_error';
+					break;
+				}
+				if ( 'schema' === $claim['skip'] ) {
+					$res['error']   = CRDR_DB::schema_message( CRDR_DB::ensure_schema() ?: array( '?' ) );
+					$res['blocked'] = 'schema';
 					break;
 				}
 				$res['skipped']++; // taken by a parallel run, or contacted/opted out since the audience was read.
@@ -542,7 +681,14 @@ class CRDR_Playbooks {
 				$res['held_out']++;
 				continue;
 			}
-			if ( self::sent_today( $id ) > (int) $pb['daily_cap'] ) { // the count includes this claim.
+			$today = self::sent_today( $id ); // includes this claim
+			if ( self::CAP_UNKNOWN === $today ) { // could not count: stop, nothing more is sent
+				CRDR_Send::release( $row );
+				$res['error']   = CRDR_Health::message( 'db_error' );
+				$res['blocked'] = 'db_error';
+				break;
+			}
+			if ( $today > (int) $pb['daily_cap'] ) {
 				CRDR_Send::release( $row );
 				break;
 			}
@@ -585,6 +731,20 @@ class CRDR_Playbooks {
 				$res['failed']++;
 				$res['error'] = $out['error'];
 				$scope        = isset( $out['scope'] ) ? $out['scope'] : 'gateway';
+				if ( 'sync' === $scope ) { // refused at the last gate because a rebuild started: nobody is at fault, stop the run.
+					$res['blocked'] = isset( $out['code'] ) ? $out['code'] : 'sync_running';
+					break;
+				}
+				if ( 'optout' === $scope ) { // opted out after being claimed: not a failure, the customer is simply left alone
+					$res['failed']--;
+					$res['skipped']++;
+					$res['error'] = '';
+					continue;
+				}
+				if ( 'db' === $scope ) { // the database could not answer the last opt-out check: stop, send nothing more
+					$res['blocked'] = 'db_error';
+					break;
+				}
 				if ( 'recipient' === $scope ) {
 					continue; // this number only: it is set aside ("rejected") and says nothing about the gateway.
 				}
@@ -594,8 +754,11 @@ class CRDR_Playbooks {
 					}
 					continue;
 				}
-				if ( 'fatal' === $scope ) { // account, key, credit, request: it will fail for everybody, stop now.
+				if ( 'fatal' === $scope || 'rate' === $scope ) { // account, key, credit, request, IP: it will fail for everybody (or the provider is throttling us), stop now.
 					break;
+				}
+				if ( 'claim' === $scope ) { // the claim was lost before the gateway (recovered by another process): this customer only, nothing was sent
+					continue;
 				}
 				if ( ++$gw_fails >= 3 ) { // network trouble or an unexplained failure three times in a row: do not hammer.
 					break;
@@ -626,6 +789,14 @@ class CRDR_Playbooks {
 			return 'auto' === $pb['mode'];
 		} ) );
 		CRDR_Health::prune( array_keys( $all ) );
+		// Not this site's address (a copy of the database): say so for each automatic campaign and send nothing.
+		if ( ! CRDR_Site::automatic_allowed() ) {
+			foreach ( $auto as $id ) {
+				CRDR_Health::record_block( $id, 'site_changed' );
+			}
+			return;
+		}
+		CRDR_Health::clear_code_all( 'site_changed' );
 		// Being outside the hours is normal at night and stays silent. A window that can never open is a mistake:
 		// say so (the rule itself is unchanged, nothing is sent).
 		if ( ! CRDR_Health::window_valid( CRDR_Settings::get( 'send_from' ), CRDR_Settings::get( 'send_to' ) ) ) {
@@ -655,13 +826,23 @@ class CRDR_Playbooks {
 	/* ---------------------------------------------------------------- results */
 
 	/**
-	 * Measure a playbook: share of contacted customers who ordered again within the window,
-	 * compared with the holdout group that was not contacted.
+	 * Measure a playbook: did the customers chosen for the message order again within the window, compared with the holdout group that was deliberately
+	 * not messaged?
 	 *
-	 * Only messages the SMS service ACCEPTED (status ok) are the treated group, and the holdout group is the customers
-	 * deliberately not messaged. A message with an unknown outcome is in neither (it is only counted in 'unknown').
+	 * DEFINITIONS (Phase 4.2). Written down because every denominator is a choice:
+	 *  - The UNIT is the customer, once. A customer is counted in the group of their FIRST assignment in this campaign: the earliest row of kind 'sms'
+	 *    with any assignment status (everything except 'norec'). Later rows (a second wave, a retry, a customer who was held out one month and drawn
+	 *    for the message the next) never count again and never move the customer to the other group.
+	 *  - The window starts at that first assignment's time and lasts window_days. Only customers whose window is over are counted (mature); the others
+	 *    are reported as `immature`.
+	 *  - PRIMARY comparison, intention to treat: `treated` = every customer first assigned to receive the message, whatever happened to the message
+	 *    afterwards (accepted, failed, number rejected, unknown, text could not be built); `holdout` = every customer first assigned to the control.
+	 *    Both groups were drawn the same way, so this comparison keeps the randomisation. Conversion = at least one order in the window; `rev` = their net sales.
+	 *  - SECONDARY, accepted only: `accepted` = the treated customers for whom the SMS service accepted at least one message (status ok), against the same
+	 *    holdout. It says how well the message works when it is delivered, but unreachable numbers are removed from one side only: read it next to the primary.
+	 *  - 'unknown' (the SMS may have gone out) is inside the primary treated group by assignment, and is counted in `unknown` for information.
 	 *
-	 * @return array treated/holdout stats, test, coupon redemptions, immature count, unknown count
+	 * @return array treated, holdout (n, conv, rev), test (primary), accepted (n, conv, rev), test_accepted, immature, sent_total, unknown, codes, redeemed, window, basis
 	 */
 	public static function results( $id ) {
 		global $wpdb;
@@ -669,44 +850,54 @@ class CRDR_Playbooks {
 		if ( ! $pb ) {
 			return null;
 		}
-		$w    = (int) $pb['window_days'];
-		$k    = CRDR_DB::contacts();
-		$o    = CRDR_DB::orders();
+		$w             = (int) $pb['window_days'];
+		$k             = CRDR_DB::contacts();
+		$o             = CRDR_DB::orders();
 		$mature_before = time() - $w * DAY_IN_SECONDS;
+		$assigned      = "'" . implode( "','", CRDR_Send_Rules::ASSIGNED ) . "'"; // the same list outcome()['measured'] is derived from
+		$first         = "SELECT ckey, MIN(id) mid, MAX(CASE WHEN status = 'ok' THEN 1 ELSE 0 END) acc FROM {$k} WHERE playbook = %s AND kind = 'sms' AND status IN ({$assigned}) GROUP BY ckey";
 
 		$sql = $wpdb->prepare(
-			"SELECT t.grp, COUNT(*) n, SUM(CASE WHEN a.cnt > 0 THEN 1 ELSE 0 END) conv, COALESCE(SUM(a.rev), 0) rev
-			 FROM {$k} t
-			 LEFT JOIN (
-			   SELECT ct.id, COUNT(od.order_id) cnt, SUM(od.net) rev
-			   FROM {$k} ct JOIN {$o} od ON od.ckey = ct.ckey AND od.ts > ct.created_ts AND od.ts <= ct.created_ts + %d
-			   WHERE ct.playbook = %s AND ct.kind = 'sms'
-			   GROUP BY ct.id
-			 ) a ON a.id = t.id
-			 WHERE t.playbook = %s AND t.kind = 'sms' AND t.status IN ('ok','holdout') AND t.created_ts <= %d
-			 GROUP BY t.grp", // phpcs:ignore WordPress.DB.PreparedSQL
-			$w * DAY_IN_SECONDS, $id, $id, $mature_before
+			"SELECT c.grp, COUNT(*) n, SUM(CASE WHEN c.cnt > 0 THEN 1 ELSE 0 END) conv, COALESCE(SUM(c.rev), 0) rev,
+			        SUM(c.acc) acc_n, SUM(CASE WHEN c.acc = 1 AND c.cnt > 0 THEN 1 ELSE 0 END) acc_conv, COALESCE(SUM(CASE WHEN c.acc = 1 THEN c.rev ELSE 0 END), 0) acc_rev
+			 FROM (
+			   SELECT t.grp grp, m.acc acc, COUNT(od.order_id) cnt, COALESCE(SUM(od.net), 0) rev
+			   FROM {$k} t JOIN ( {$first} ) m ON m.mid = t.id
+			   LEFT JOIN {$o} od ON od.ckey = t.ckey AND od.ts > t.created_ts AND od.ts <= t.created_ts + %d
+			   WHERE t.created_ts <= %d
+			   GROUP BY t.id, t.grp, m.acc
+			 ) c GROUP BY c.grp", // phpcs:ignore WordPress.DB.PreparedSQL
+			$id, $w * DAY_IN_SECONDS, $mature_before
 		);
-		$g = array( 'treated' => array( 'n' => 0, 'conv' => 0, 'rev' => 0.0 ), 'holdout' => array( 'n' => 0, 'conv' => 0, 'rev' => 0.0 ) );
+		$g = array(
+			'treated' => array( 'n' => 0, 'conv' => 0, 'rev' => 0.0 ),
+			'holdout' => array( 'n' => 0, 'conv' => 0, 'rev' => 0.0 ),
+		);
+		$acc = array( 'n' => 0, 'conv' => 0, 'rev' => 0.0 );
 		foreach ( (array) $wpdb->get_results( $sql, ARRAY_A ) as $r ) { // phpcs:ignore WordPress.DB.PreparedSQL
 			if ( isset( $g[ $r['grp'] ] ) ) {
 				$g[ $r['grp'] ] = array( 'n' => (int) $r['n'], 'conv' => (int) $r['conv'], 'rev' => (float) $r['rev'] );
+				if ( 'treated' === $r['grp'] ) {
+					$acc = array( 'n' => isset( $r['acc_n'] ) ? (int) $r['acc_n'] : 0, 'conv' => isset( $r['acc_conv'] ) ? (int) $r['acc_conv'] : 0, 'rev' => isset( $r['acc_rev'] ) ? (float) $r['acc_rev'] : 0.0 );
+				}
 			}
 		}
+		// customers whose first assignment is still inside its measurement window
 		$immature = (int) $wpdb->get_var( $wpdb->prepare(
-			"SELECT COUNT(*) FROM {$k} WHERE playbook = %s AND kind = 'sms' AND status IN ('ok','holdout') AND created_ts > %d", // phpcs:ignore WordPress.DB.PreparedSQL
+			"SELECT COUNT(*) FROM {$k} t JOIN ( {$first} ) m ON m.mid = t.id WHERE t.created_ts > %d", // phpcs:ignore WordPress.DB.PreparedSQL
 			$id, $mature_before
 		) );
 		$sent_total = (int) $wpdb->get_var( $wpdb->prepare(
 			"SELECT COUNT(*) FROM {$k} WHERE playbook = %s AND kind = 'sms' AND grp = 'treated' AND status = 'ok'", $id // phpcs:ignore WordPress.DB.PreparedSQL
 		) );
 
-		// Messages whose outcome is unknown may or may not have gone out, so they belong to neither group; say how many.
+		// Messages whose outcome is unknown may or may not have gone out; they are inside the primary treated group (by assignment). Counted for information.
 		$unknown = (int) $wpdb->get_var( $wpdb->prepare(
 			"SELECT COUNT(*) FROM {$k} WHERE playbook = %s AND kind = 'sms' AND grp = 'treated' AND status = 'unknown'", $id // phpcs:ignore WordPress.DB.PreparedSQL
 		) );
 
-		$test = CRDR_Stats::two_prop( $g['treated']['conv'], $g['treated']['n'], $g['holdout']['conv'], $g['holdout']['n'] );
+		$test          = CRDR_Stats::two_prop( $g['treated']['conv'], $g['treated']['n'], $g['holdout']['conv'], $g['holdout']['n'] );
+		$test_accepted = CRDR_Stats::two_prop( $acc['conv'], $acc['n'], $g['holdout']['conv'], $g['holdout']['n'] );
 
 		// Coupon redemptions among the customers who received a code.
 		$codes   = $wpdb->get_col( $wpdb->prepare( "SELECT coupon FROM {$k} WHERE playbook = %s AND coupon <> '' AND status = 'ok' LIMIT 1000", $id ) ); // phpcs:ignore WordPress.DB.PreparedSQL
@@ -722,15 +913,18 @@ class CRDR_Playbooks {
 		}
 
 		return array(
-			'treated'    => $g['treated'],
-			'holdout'    => $g['holdout'],
-			'test'       => $test,
-			'immature'   => $immature,
-			'sent_total' => $sent_total, // accepted by the SMS service (not "delivered": nothing confirms that)
-			'unknown'    => $unknown,    // left out of the comparison
-			'codes'      => count( $codes ),
-			'redeemed'   => $redeemed,
-			'window'     => $w,
+			'basis'         => 'itt',       // intention to treat: see the definitions above
+			'treated'       => $g['treated'],
+			'holdout'       => $g['holdout'],
+			'test'          => $test,
+			'accepted'      => $acc,        // secondary: treated customers with at least one message accepted by the SMS service
+			'test_accepted' => $test_accepted,
+			'immature'      => $immature,
+			'sent_total'    => $sent_total, // accepted by the SMS service (not "delivered": nothing confirms that)
+			'unknown'       => $unknown,
+			'codes'         => count( $codes ),
+			'redeemed'      => $redeemed,
+			'window'        => $w,
 		);
 	}
 }

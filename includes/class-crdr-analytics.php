@@ -9,6 +9,9 @@ class CRDR_Analytics {
 
 	const OPTION = 'crdr_stats';
 
+	/** A customer needs this many days since the first order before "did they come back?" is a fair question. */
+	const TENURE_DAYS = 90;
+
 	/** @return array */
 	public static function get() {
 		$d = get_option( self::OPTION );
@@ -24,7 +27,7 @@ class CRDR_Analytics {
 		$stats = array( 'built' => time() );
 
 		/* --------------------------------------------- one pass over all orders */
-		$rows = $wpdb->get_results( "SELECT ckey, ts, net FROM {$o} ORDER BY ckey, ts", ARRAY_N ); // phpcs:ignore WordPress.DB.PreparedSQL
+		$rows = $wpdb->get_results( "SELECT ckey, ts, net FROM {$o} WHERE ckey <> '' ORDER BY ckey, ts", ARRAY_N ); // (void orders - fully refunded or free - have an empty key and are not orders here) // phpcs:ignore WordPress.DB.PreparedSQL
 		$monthly      = array();
 		$gaps         = array();
 		$second_days  = array();
@@ -32,6 +35,7 @@ class CRDR_Analytics {
 		$weekday      = array_fill( 0, 7, 0 );
 		$hour         = array_fill( 0, 24, 0 );
 		$nets         = array();
+		$open_ages    = array();   // days since the only order of each customer who never ordered again (the open intervals)
 		$repeat_rev   = 0.0;
 		$total_rev    = 0.0;
 		$cust_orders  = array();
@@ -42,9 +46,23 @@ class CRDR_Analytics {
 		$first_ts     = 0;
 		$cust_rev     = 0.0;
 
-		$flush_customer = function () use ( &$cust_orders, &$repeat_rev, &$cust_rev, &$prev_key ) {
-			if ( null !== $prev_key && $cust_orders[ $prev_key ] >= 2 ) {
+		$built          = $stats['built'];
+		$mature_n       = 0;       // customers whose first order is at least TENURE_DAYS old
+		$mature_repeat  = 0;       // ... of whom ordered at least twice
+		$flush_customer = function () use ( &$cust_orders, &$repeat_rev, &$cust_rev, &$prev_key, &$prev_ts, &$open_ages, &$first_ts, &$mature_n, &$mature_repeat, $built ) {
+			if ( null === $prev_key ) {
+				return;
+			}
+			if ( $built - $first_ts >= self::TENURE_DAYS * DAY_IN_SECONDS ) {
+				$mature_n++;
+				if ( $cust_orders[ $prev_key ] >= 2 ) {
+					$mature_repeat++;
+				}
+			}
+			if ( $cust_orders[ $prev_key ] >= 2 ) {
 				$repeat_rev += $cust_rev;
+			} elseif ( 1 === $cust_orders[ $prev_key ] ) {
+				$open_ages[] = max( 0, ( $built - $prev_ts ) / DAY_IN_SECONDS ); // $prev_ts = this customer's only order
 			}
 		};
 
@@ -117,18 +135,48 @@ class CRDR_Analytics {
 		} ) );
 		sort( $second_days, SORT_NUMERIC );
 		$stats['orders_total']    = count( $nets );
+		// Refund amounts that could not be tied to product lines (CRDR_Sales): said out loud, never folded into the numbers.
+		$gap = $wpdb->get_row( "SELECT COUNT(*) n, COALESCE(SUM(refund_gap), 0) amount FROM {$o} WHERE refund_gap > 0", ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL
+		$stats['refund_gap'] = array( 'orders' => is_array( $gap ) ? (int) $gap['n'] : 0, 'amount' => is_array( $gap ) ? (float) $gap['amount'] : 0.0 );
 		$stats['customers_total'] = $customers_total;
 		$stats['repeat']          = array(
 			'customers'   => $repeaters,
 			'customers_pct' => $customers_total ? $repeaters / $customers_total : 0,
 			'revenue_pct' => $total_rev > 0 ? $repeat_rev / $total_rev : 0,
+			// The median is among customers who DID come back (the insight card says so). Everybody else is in the proportions below.
 			'second_median_days' => $second_days ? CRDR_Stats::percentile( $second_days, 50 ) : null,
+			// Repeat rate among customers who have had time to repeat (first order at least TENURE_DAYS old). 'customers_pct' above counts
+			// everybody, including a customer acquired yesterday, and so reads low in a growing shop.
+			'mature_customers'     => $mature_n,
+			'customers_pct_mature' => $mature_n ? $mature_repeat / $mature_n : null,
 		);
+		// Share of customers who placed a SECOND order within N days of the first, with the observation window respected: a customer whose
+		// first order is younger than N days and who has not come back yet is left out of that N (their answer is not known yet).
+		$stats['return_within'] = array();
+		foreach ( array( 30, 60, 90 ) as $days ) {
+			$hit  = 0;
+			$late = 0;
+			foreach ( $second_days as $sd ) {
+				if ( $sd <= $days ) {
+					$hit++;
+				} else {
+					$late++; // came back, but after N days: observed for at least N days
+				}
+			}
+			$old = 0;
+			foreach ( $open_ages as $age ) {
+				if ( $age >= $days ) {
+					$old++; // never came back and has been watched for the whole N days
+				}
+			}
+			$n = $hit + $late + $old;
+			$stats['return_within'][] = array( 'days' => $days, 'hit' => $hit, 'n' => $n, 'p' => $n ? $hit / $n : null );
+		}
 
 		/* ------------------------------------------------------- gap analytics */
 		$edges                = array( 7, 14, 30, 45, 60, 90, 120, 180 );
 		$stats['gap_hist']    = array( 'edges' => $edges, 'counts' => CRDR_Stats::histogram( $gaps, $edges ), 'n' => count( $gaps ) );
-		$stats['survival']    = CRDR_Stats::survival_table( $gaps, 15, 240, 30 );
+		$stats['survival']    = CRDR_Stats::survival_table( $gaps, 15, 240, 30, $open_ages );
 		sort( $gaps, SORT_NUMERIC );
 		$stats['gap_median']  = $gaps ? CRDR_Stats::percentile( $gaps, 50 ) : null;
 
@@ -185,14 +233,15 @@ class CRDR_Analytics {
 			}
 			unset( $cursor );
 			$n_orders = max( 1, count( $baskets ) );
-			$res      = CRDR_Stats::affinity( array_values( $baskets ), max( 3, (int) ceil( $n_orders * 0.003 ) ) );
+			$res      = CRDR_Stats::affinity( array_values( $baskets ), max( 3, (int) ceil( $n_orders * 0.003 ) ), 12, $stats['orders_total'] );
 			$pairs    = array_slice( array_values( array_filter( $res['pairs'], function ( $p ) {
 				return $p['lift'] >= 1.2;
 			} ) ), 0, 60 );
 			$stats['basket_orders'] = $res['orders'];
+			// Share of ALL orders (not only of those that contain a listed product) that hold two or more different products.
 			$stats['multi_item_pct'] = count( array_filter( $baskets, function ( $b ) {
 				return count( array_unique( $b ) ) >= 2;
-			} ) ) / $n_orders;
+			} ) ) / max( 1, $stats['orders_total'] );
 		}
 		$stats['pairs'] = $pairs;
 

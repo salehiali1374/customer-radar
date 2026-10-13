@@ -110,3 +110,7 @@ node_modules/
 vendor/
 bower_components/
 wp-content/uploads/
+
+# Contracts, scans and credentials never go into the repository
+*.pdf
+kavenegar api key*

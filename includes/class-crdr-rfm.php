@@ -125,12 +125,17 @@ class CRDR_RFM {
 	 * @param int   $m
 	 * @param int   $orders      total number of orders
 	 * @param float $days_since  days since the last order
-	 * @param array $opt         new_days (30), lost_days (365)
+	 * @param array $opt         new_days (30), lost_days (365): past lost_days the recency score is capped at 2 (no recent label for a stale customer)
 	 * @return string segment key
 	 */
 	public static function segment( $r, $f, $m, $orders, $days_since, array $opt = array() ) {
 		$new_days  = isset( $opt['new_days'] ) ? (float) $opt['new_days'] : 30;
 		$lost_days = isset( $opt['lost_days'] ) ? (float) $opt['lost_days'] : 365;
+		// ABSOLUTE guard (Phase 4.2): recency is scored relative to the store, so in a store whose customers are all old, a customer last seen
+		// 450 days ago could rank "recent" and be labelled champion / loyal / potential / new. Past lost_days nobody counts as recent.
+		if ( $days_since > $lost_days ) {
+			$r = min( (int) $r, 2 );
+		}
 
 		if ( $orders <= 1 && $days_since <= $new_days ) {
 			return 'new';
@@ -234,6 +239,9 @@ class CRDR_RFM {
 			$orders     = (int) $row['orders_count'];
 			$days_since = max( 0, ( $now - (int) $row['last_ts'] ) / self::DAY );
 			$r          = self::score_recency( $days_since, $day_cuts );
+			if ( $days_since > (float) ( isset( $opt['lost_days'] ) ? $opt['lost_days'] : 365 ) ) {
+				$r = min( $r, 2 ); // the same absolute guard as in segment(), applied before R is stored so that R and the label agree
+			}
 			$f          = self::score_frequency( $orders );
 			$m          = self::score_high_better( (float) $row['total_spent'], $spent_cuts );
 			$seg        = self::segment( $r, $f, $m, $orders, $days_since, $opt );

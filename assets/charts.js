@@ -25,6 +25,7 @@
 
 	function el(name, attrs, parent, text) {
 		var e = document.createElementNS(NS, name);
+		if (name === 'text') { e.style.unicodeBidi = 'plaintext'; }
 		Object.keys(attrs || {}).forEach(function (k) { e.setAttribute(k, attrs[k]); });
 		if (text !== undefined) { e.textContent = text; }
 		if (parent) { parent.appendChild(e); }
@@ -33,7 +34,9 @@
 
 	function svg(host, w, h, label) {
 		host.innerHTML = '';
-		var s = el('svg', { viewBox: '0 0 ' + w + ' ' + h, width: '100%', role: 'img', 'aria-label': label || '', style: 'max-width:100%;height:auto;display:block' });
+		// Direction is pinned to ltr so that text-anchor start/end mean the PHYSICAL left/right edge, which is what every chart below assumes (in an rtl page
+		// they would be mirrored and the labels would run out of the picture); each text chooses its own reading direction from its first letter.
+		var s = el('svg', { viewBox: '0 0 ' + w + ' ' + h, width: '100%', role: 'img', 'aria-label': label || '', direction: 'ltr', style: 'max-width:100%;height:auto;display:block;direction:ltr' });
 		host.appendChild(s);
 		return s;
 	}

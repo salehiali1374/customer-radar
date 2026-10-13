@@ -30,9 +30,10 @@
 .crdr-cards .crdr-card { margin: 0; }
 
 /* kpis */
-.crdr-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin: 14px 0; }
+/* six figures: 3 x 2 (not 5 + 1 with a long amount breaking onto two lines), 2 x 3 and 1 x 6 on narrower screens */
+.crdr-kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 14px 0; }
 .crdr-kpi { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; }
-.crdr-kpi-v { font-size: 22px; font-weight: 700; line-height: 1.4; }
+.crdr-kpi-v { font-size: 22px; font-weight: 700; line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .crdr-kpi-l { color: #374151; font-size: 13px; margin-top: 2px; }
 .crdr-kpi-h { color: var(--mut); font-size: 12px; margin-top: 4px; }
 
@@ -110,11 +111,30 @@ tr.crdr-done { opacity: .45; }
 .crdr-sample { background: #f9fafb; border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; margin: 6px 0; font-size: 13px; line-height: 1.9; }
 .crdr-runlog { background: #0f172a; color: #e2e8f0; border-radius: 10px; padding: 10px 12px; font-size: 12.5px; line-height: 1.9; margin-top: 10px; max-height: 160px; overflow: auto; }
 
+/* SMS variable help and the guide tab */
+.crdr-vars { margin: 6px 0; }
+.crdr-vars summary { cursor: pointer; color: var(--pri); font-size: 13px; }
+.crdr-vars dl, dl.crdr-vars { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 8px 0; font-size: 13px; line-height: 1.9; }
+.crdr-vars dt { margin: 0; }
+.crdr-vars dd { margin: 0; }
+.crdr-vars code { direction: ltr; unicode-bidi: isolate; }
+.crdr-guide summary { cursor: pointer; font-size: 16px; font-weight: 700; }
+.crdr-guide-body { margin-top: 10px; line-height: 2; font-size: 14px; max-width: 900px; }
+.crdr-guide-body .crdr-steps { line-height: 2; }
+.crdr-sample { background: #f9fafb; border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; font-size: 13px; }
+.crdr-form .description { max-width: 60em; line-height: 1.9; }
+
 /* forms */
 .crdr-check { display: inline-block; margin: 0 0 6px 14px; }
 .crdr-form h2, .crdr-form h3 { margin-top: 22px; }
 .crdr-form .form-table th { width: 330px; }
 
+@media (max-width: 960px) {
+	.crdr-kpis { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 480px) {
+	.crdr-kpis { grid-template-columns: 1fr; }
+}
 @media (max-width: 782px) {
 	.crdr-grid { grid-template-columns: 1fr; }
 	.crdr-cards { grid-template-columns: 1fr; }

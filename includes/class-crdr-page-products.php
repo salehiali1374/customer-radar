@@ -43,7 +43,7 @@ class CRDR_Page_Products {
 		if ( ! empty( $st['multi_item_pct'] ) || isset( $st['multi_item_pct'] ) ) {
 			echo '<li>' . esc_html( CRDR_UI::pct( $st['multi_item_pct'] ) ) . ' سفارش‌ها بیش از یک محصول دارند. هر چه این عدد بالاتر برود، میانگین سبد بیشتر می‌شود.</li>';
 		}
-		echo '<li>برای هر محصول پرفروش، یک محصول مکمل نزدیکش نشان دهید («پیشنهاد مکمل» در همین صفحه).</li><li>قبل از تخفیف روی بسته، سود هر بسته را با حاشیه‌ی سود خودتان بسنجید؛ در جدول زیر محاسبه شده است.</li></ul></section>';
+		echo '<li>به مشتریانی که فقط یکی از یک جفت را خریده‌اند، دیگری را پیشنهاد دهید: در «کمپین‌ها» کمپین «پیشنهاد محصول مکمل» همین کار را با پیامک می‌کند (برای هر مشتری، محصولی را انتخاب می‌کند که هنوز نخریده).</li><li>قبل از تخفیف روی بسته، سود هر بسته را با حاشیه‌ی سود خودتان بسنجید؛ در جدول زیر محاسبه شده است.</li></ul></section>';
 		echo '</div>';
 
 		/* pairs */
@@ -51,13 +51,13 @@ class CRDR_Page_Products {
 		$m     = (int) CRDR_Settings::get( 'margin_pct' );
 		$d     = (int) CRDR_Settings::get( 'bundle_discount' );
 		echo '<div class="crdr-card"><h2>محصولاتی که با هم خریده می‌شوند</h2>';
-		echo '<p class="crdr-muted">حاشیه‌ی سود فرضی: ' . esc_html( CRDR_UI::num( $m ) ) . '٪ · تخفیف پیشنهادی بسته: ' . esc_html( CRDR_UI::num( $d ) ) . '٪ (از «تنظیمات» قابل تغییر). «لیفت» یعنی این دو محصول چند برابرِ حالت تصادفی با هم خریده شده‌اند.</p>';
+		echo '<p class="crdr-muted">حاشیه‌ی سود فرضی: ' . esc_html( CRDR_UI::num( $m ) ) . '٪ · تخفیف پیشنهادی بسته: ' . esc_html( CRDR_UI::num( $d ) ) . '٪ (از «تنظیمات» قابل تغییر). «لیفت» یعنی این دو محصول چند برابرِ حالت تصادفی با هم خریده شده‌اند (۱× یعنی هیچ ارتباطی؛ هرچه بیشتر، ارتباط قوی‌تر). «سفارش مشترک» تعداد سفارش‌هایی است که هر دو در آن بوده‌اند.</p>';
 		if ( ! $pairs ) {
 			echo '<p>هنوز جفت محصول معناداری پیدا نشد (دست‌کم چند سفارش مشترک و لیفت بالاتر از ۱٫۲ لازم است).</p></div>';
 			CRDR_UI::close();
 			return;
 		}
-		echo '<div class="crdr-scroll"><table class="widefat striped crdr-table"><thead><tr><th>بسته</th><th>سفارش مشترک</th><th>احتمال خرید دومی</th><th>لیفت</th><th>سود بسته</th><th>شرط صرفه</th><th></th></tr></thead><tbody>';
+		echo '<div class="crdr-scroll"><table class="widefat striped crdr-table"><thead><tr><th>بسته</th><th>سفارش مشترک</th><th>اگر اولی را خرید ← دومی را هم می‌خرد / برعکس</th><th>لیفت</th><th>سود هر بسته (با تخفیف)</th><th>شرط صرفه</th><th></th></tr></thead><tbody>';
 		foreach ( array_slice( $pairs, 0, 15 ) as $p ) {
 			$pa = wc_get_product( $p['a'] );
 			$pb = wc_get_product( $p['b'] );
@@ -80,7 +80,7 @@ class CRDR_Page_Products {
 			echo '<td class="crdr-muted">' . esc_html( $verdict ) . '</td>';
 			echo '<td><form method="post" action="' . esc_url( admin_url( 'admin-post.php' ) ) . '"><input type="hidden" name="action" value="crdr_bundle_coupon"><input type="hidden" name="a" value="' . (int) $p['a'] . '"><input type="hidden" name="b" value="' . (int) $p['b'] . '"><input type="hidden" name="percent" value="' . (int) $d . '">';
 			wp_nonce_field( CRDR_Actions::NONCE );
-			echo '<button class="button button-small">ساخت کد تخفیف بسته</button></form></td></tr>';
+			echo '<button class="button button-small" data-confirm="' . esc_attr( 'یک کد تخفیف واقعی در ووکامرس ساخته می‌شود: ' . CRDR_Jalali::digits( (string) $d ) . '٪ روی این دو محصول، ۳۰ روز اعتبار. این کد یک‌بارمصرف و مخصوص یک نفر نیست؛ هر کس آن را داشته باشد می‌تواند استفاده کند. ادامه می‌دهید؟' ) . '">ساخت کد تخفیف بسته</button></form></td></tr>';
 		}
 		echo '</tbody></table></div>';
 		echo '<p class="crdr-muted">کد تخفیف بسته روی هر دو محصول اعمال می‌شود (ووکامرس شرط «هر دو در سبد» را به‌صورت پیش‌فرض اجباری نمی‌کند). برای تبلیغ، متن بنر را بر پایه‌ی خرید مشترک بنویسید.</p></div>';

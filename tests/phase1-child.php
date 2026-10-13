@@ -62,6 +62,67 @@ switch ( $job ) {
 		echo wp_json_encode( array( 'error' => 'no redirect' ) ) . "\n";
 		break;
 
+	case 'sync_lock': // try to take the sync lock and hold it for N ms: only one process may succeed
+		$m   = new ReflectionMethod( 'CRDR_Sync', 'lock' );
+		$m->setAccessible( true );
+		$got = $m->invoke( null );
+		if ( false !== $got ) {
+			usleep( (int) $args[0] * 1000 );
+			CRDR_Sync::unlock( $got );
+		}
+		echo wp_json_encode( array( 'got' => false !== $got ) ) . "\n";
+		break;
+
+	case 'sync_step': // one real sync step
+		$st = CRDR_Sync::step();
+		echo wp_json_encode( array( 'busy' => ! empty( $st['busy'] ), 'phase' => $st['phase'], 'page' => isset( $st['page'] ) ? $st['page'] : 0 ) ) . "\n";
+		break;
+
+	case 'identity_die': // one "finalize" step that dies (exit, as after a fatal error) right BEFORE its k-th write after the evidence query; k = 0 only counts
+		$k    = (int) $args[0];
+		$n    = 0;
+		$seen = false;
+		add_filter( 'query', function ( $q ) use ( $k, &$n, &$seen ) {
+			if ( false !== strpos( $q, 'SELECT ckey, uid, email FROM' ) ) {
+				$seen = true;
+			}
+			if ( $seen && preg_match( '/^\s*(INSERT|UPDATE|DELETE)/i', $q ) && ++$n === $k ) {
+				echo wp_json_encode( array( 'died_before_write' => $n ) ) . "\n";
+				exit( 0 );
+			}
+			return $q;
+		} );
+		$st = CRDR_Sync::step();
+		echo wp_json_encode( array( 'finished' => true, 'writes' => $n, 'phase' => $st['phase'] ) ) . "\n";
+		break;
+
+	case 'sync_die': // a step that dies in the middle of a page (exit during the 20th order), like a timeout or a fatal error would
+		$n = 0;
+		add_filter( 'woocommerce_order_get_billing_phone', function ( $v ) use ( &$n ) {
+			if ( ++$n >= 20 ) {
+				echo wp_json_encode( array( 'died_after_orders' => $n ) ) . "\n";
+				exit( 0 ); // shutdown functions still run, exactly as after a fatal error
+			}
+			return $v;
+		} );
+		CRDR_Sync::step();
+		echo wp_json_encode( array( 'died' => false ) ) . "\n";
+		break;
+
+	case 'export': // the CSV export handler: it must refuse (wp_die) while the data is rebuilt, and stream otherwise
+		wp_set_current_user( 1 );
+		$_GET = $_REQUEST = array( '_wpnonce' => wp_create_nonce( CRDR_Actions::NONCE ) );
+		add_filter( 'wp_die_handler', function () {
+			return function ( $message ) {
+				echo wp_json_encode( array( 'refused' => true, 'message' => wp_strip_all_tags( (string) $message ) ) ) . "\n";
+				exit( 0 );
+			};
+		} );
+		ob_start();
+		CRDR_Actions::post_export(); // streams and calls exit when it is allowed
+		echo wp_json_encode( array( 'refused' => false ) ) . "\n";
+		break;
+
 	case 'crash': // claim, talk to the gateway, then die before the outcome is recorded
 		$c     = CRDR_Actions::customer_by_key( $args[0] );
 		$claim = CRDR_Send::claim( $c['ckey'], 'dormant', 'crash' );

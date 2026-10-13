@@ -125,7 +125,11 @@ class CRDR_Send_Rules {
 	 *               delivered always false (not established by anything we store)
 	 *               contact  counts as "customer was contacted" (cooldown, audience exclusion)
 	 *               cap      uses up the daily cap (the SMS may have gone out)
-	 *               measured is part of the campaign result comparison
+	 *               measured the row can be a customer's FIRST ASSIGNMENT in a campaign, i.e. the customer is part of the PRIMARY comparison of the campaign
+	 *                        results, which is by intention to treat (CRDR_Playbooks::results): everybody first assigned to the message counts as "treated" whatever
+	 *                        happened to the SMS (accepted, failed, number rejected, unknown, text not built), against everybody first assigned to the holdout.
+	 *                        Only 'norec' (nothing to recommend, nobody was assigned) and an unrecognised status are not measured. It is NOT "the SMS
+	 *                        was accepted": that is the secondary comparison, which uses group = 'accepted'.
 	 */
 	public static function outcome( $status ) {
 		$m = array(
@@ -150,9 +154,12 @@ class CRDR_Send_Rules {
 			'delivered' => false,
 			'contact'   => ! in_array( $s, self::NOT_CONTACT, true ),
 			'cap'       => in_array( $s, array( 'pending', 'ok', 'unknown' ), true ),
-			'measured'  => in_array( $s, array( 'ok', 'holdout' ), true ),
+			'measured'  => in_array( $s, self::ASSIGNED, true ),
 		);
 	}
+
+	/** Statuses that make a customer part of a campaign's primary (intention-to-treat) comparison when they are the customer's first row. */
+	const ASSIGNED = array( 'pending', 'ok', 'unknown', 'failed', 'retry', 'nobuild', 'rejected', 'holdout' );
 
 	/** Rejected-recipient rows newer than this still count. @param int $epoch time someone pressed "try again" for the campaign */
 	public static function reject_backoff_since( $now, $epoch ) {
@@ -260,35 +267,44 @@ class CRDR_Send_Rules {
 	/* ------------------------------------------------- reading the gateway's answer */
 
 	/**
-	 * WHO a Kavenegar status that means "nothing was sent" is about. Taken from the provider's own table
-	 * (kavenegar.com/rest.html), not guessed:
+	 * WHO a Kavenegar status that means "nothing was sent" is about. Taken from the provider's own table (the "return codes" table of
+	 * kavenegar.com/rest.html, re-read for Phase 4.2), not guessed:
 	 *   recipient  411 the receptor number is not valid: this customer only, will not work next time either
-	 *   message    413 text empty or too long, 422 unsuitable characters: this text, not the customer's number
-	 *   fatal      account, key, credit, sender line, IP access, or a malformed request: it affects every customer
-	 *   uncertain  402 "operation failed" without a reason: cannot tell whether it is about this customer
-	 * '' = not in the table. 409 ("try later") is deliberately NOT here: it does not say the request was not
-	 * processed, so it stays ambiguous (unknown = never retried), like any code that is not documented.
+	 *   message    413 text empty or too long, 422 unsuitable characters, 420 links in the text are restricted for this account:
+	 *              the TEXT (not the customer) is refused; set aside until the text / settings are saved; 10 in a row stop the run
+	 *   fatal      account, key, credit, sender line, IP access (407, 416, 429), line access level (427), or a malformed request:
+	 *              it affects every customer, the run stops at the first one and nobody is penalised
+	 *   rate       451 too many calls from this IP in a time window: the provider is throttling us. Nothing is wrong with the customer or the
+	 *              text; the run stops at once (sending more would only prolong the limit) and the customer is tried again at the next run
+	 * '' = not in the table. 409 ("try later") and 402 ("operation failed", no reason given) are deliberately NOT here: neither says that the request
+	 * was not processed, so they stay ambiguous (unknown = never retried, counts as contacted), like any code that is not documented. 402 used to be
+	 * retried after six hours with a fresh `localid`; that could send the same SMS twice (a fresh localid defeats the provider's duplicate check) and the
+	 * provider's table gives no evidence that 402 means "not processed".
+	 *
+	 * Honesty note: the provider's page does NOT say, for any code, that the message was or was not processed. Treating 416 / 420 / 427 / 429 /
+	 * 451 as "nothing was sent" rests on what they are: authorisation, content-policy and rate-limit rejections, which a gateway applies before it
+	 * accepts a message. That is an inference from the documented meaning, verified only against a mock; see docs/gateway-failures.md.
 	 */
 	public static function code_scope( $status ) {
 		$map = array(
 			411 => 'recipient',
-			413 => 'message', 422 => 'message',
+			413 => 'message', 422 => 'message', 420 => 'message',
 			400 => 'fatal', 401 => 'fatal', 403 => 'fatal', 404 => 'fatal', 405 => 'fatal', 406 => 'fatal', 407 => 'fatal',
-			412 => 'fatal', 414 => 'fatal', 417 => 'fatal', 418 => 'fatal', 424 => 'fatal', 426 => 'fatal', 428 => 'fatal',
-			431 => 'fatal', 432 => 'fatal', 607 => 'fatal',
-			402 => 'uncertain',
+			412 => 'fatal', 414 => 'fatal', 416 => 'fatal', 417 => 'fatal', 418 => 'fatal', 424 => 'fatal', 426 => 'fatal', 427 => 'fatal', 428 => 'fatal',
+			429 => 'fatal', 431 => 'fatal', 432 => 'fatal', 501 => 'fatal', 607 => 'fatal',
+			451 => 'rate',
 		);
 		return isset( $map[ (int) $status ] ) ? $map[ (int) $status ] : '';
 	}
 
 	/** Kavenegar status codes that mean "nothing was sent". */
 	public static function definite_failure_codes() {
-		return array( 400, 401, 402, 403, 404, 405, 406, 407, 411, 412, 413, 414, 417, 418, 422, 424, 426, 428, 431, 432, 607 );
+		return array( 400, 401, 403, 404, 405, 406, 407, 411, 412, 413, 414, 416, 417, 418, 420, 422, 424, 426, 427, 428, 429, 431, 432, 451, 501, 607 );
 	}
 
 	/** The contact status that records a definite failure of this scope (see NOT_CONTACT). */
 	public static function failure_status( $scope ) {
-		$map = array( 'recipient' => 'rejected', 'message' => 'nobuild', 'uncertain' => 'retry' );
+		$map = array( 'recipient' => 'rejected', 'message' => 'nobuild' );
 		return isset( $map[ $scope ] ) ? $map[ $scope ] : 'failed';
 	}
 
@@ -307,10 +323,29 @@ class CRDR_Send_Rules {
 			412 => 'شماره‌ی خط فرستنده معتبر نیست',
 			407 => 'دسترسی مجاز نیست (آی‌پی سرور را در تنظیمات امن سرویس پیامک بررسی کنید)',
 			418 => 'اعتبار حساب سرویس پیامک کافی نیست',
-			402 => 'سرویس پیامک عملیات را انجام نداد و علتش را نگفت',
+			416 => 'آی‌پی سرور وردپرس با آی‌پی‌های مجاز تعریف‌شده در پنل کاوه‌نگار یکی نیست (تنظیمات امن/آی‌پی مجاز پنل را بررسی کنید)',
+			420 => 'استفاده از لینک در متن پیامک برای حساب کاوه‌نگار شما محدود است؛ لینک را از متن بردارید یا از کاوه‌نگار بخواهید لینک را برایتان باز کند',
+			427 => 'استفاده از این خط فرستنده نیازمند ایجاد سطح دسترسی در پنل کاوه‌نگار است',
+			429 => 'آی‌پی سرور وردپرس در کاوه‌نگار محدود شده است (با پشتیبانی کاوه‌نگار تماس بگیرید)',
+			501 => 'حساب کاوه‌نگار در حالت آزمایشی است و فقط به شماره‌ی صاحب حساب پیامک می‌فرستد',
+			451 => 'کاوه‌نگار به‌دلیل تعداد زیاد درخواست، آی‌پی سرور را موقتاً محدود کرده است؛ بعداً دوباره امتحان می‌شود',
 		);
 		$why = isset( $m[ $status ] ) ? $m[ $status ] : 'سرویس پیامک درخواست را نپذیرفت';
 		return $why . ' (کاوه‌نگار، کد ' . $status . ').';
+	}
+
+	/**
+	 * A short, masked piece of a text that came from ANOTHER plugin, so that an administrator can see what kind of answer it was without the
+	 * plugin storing whatever that text contains. Removed: links, long token-like strings (keys, passwords, session ids), phone numbers and the
+	 * known secrets; control characters; cut to $max characters. Never use it to decide anything.
+	 */
+	public static function safe_excerpt( $text, array $secrets = array(), $max = 80 ) {
+		$text = self::redact( (string) $text, $secrets );
+		$text = preg_replace( '#[a-z][a-z0-9+.\-]*://\S+#iu', '[لینک]', $text );
+		$text = preg_replace( '/[A-Za-z0-9_\-=+\/]{16,}/', '[***]', (string) $text );
+		$text = preg_replace( '/[\x00-\x1F\x7F]+/u', ' ', (string) $text );
+		$text = trim( preg_replace( '/\s+/u', ' ', (string) $text ) );
+		return mb_strlen( $text ) > $max ? mb_substr( $text, 0, $max ) . '…' : $text;
 	}
 
 	/** A network error reduced to what is safe to keep: its cURL number, never its text (that may carry the request URL). */

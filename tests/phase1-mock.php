@@ -7,7 +7,9 @@
  * Behaviour is chosen by the option `crdr_t_mock` (JSON):
  *   mode            ok | timeout | connect_fail | http500 | credit        (default for every phone)
  *                   invalid_receptor (411) | bad_text (422) | too_long (413) | op_failed (402) | bad_key (403)
- *                   server_busy (409) | rate_limit (451, not in the provider's table) | echo | leaky
+ *                   server_busy (409) | rate_limit (451, the provider's "too many calls") | undocumented (499, not in the provider's table) | echo | leaky
+ *                   code_<N>  HTTP N with return.status N (any documented code: code_416, code_420 ...)
+ *                   h200_<N>  HTTP 200 whose return.status is N (a lying or unexpected answer) | garbage200 (HTTP 200, body is not JSON)
  *                   echo  = 411 whose message repeats the phone number and the API key
  *                   leaky = a transport error whose text contains the request URL (key) and the phone number
  *   by_phone        { "09120000001": "timeout", ... }                      (per-phone override)
@@ -26,6 +28,20 @@ if ( ! function_exists( 'crdr_t_log_path' ) ) {
 		return array_map( function ( $l ) {
 			return json_decode( $l, true );
 		}, array_filter( file( $f, FILE_IGNORE_NEW_LINES ) ) );
+	}
+
+	/**
+	 * PHASE 4.2 (REV-1/REV-3): sales are counted from the order's LINES (net of refunds), so a test order that is meant to be a
+	 * real purchase carries one line worth $amount. An order with only a total and no lines has no sales and is a void order.
+	 */
+	function crdr_t_money( $order, $amount ) {
+		$it = new WC_Order_Item_Product();
+		$it->set_name( 'test line' );
+		$it->set_quantity( 1 );
+		$it->set_subtotal( $amount );
+		$it->set_total( $amount );
+		$order->add_item( $it );
+		$order->set_total( $amount );
 	}
 
 	function crdr_t_install_mock() {
@@ -82,10 +98,20 @@ if ( ! function_exists( 'crdr_t_log_path' ) ) {
 					return $reply( 409, '{"return":{"status":409,"message":"سرور قادر به پاسخگوئی نیست بعدا تلاش کنید"}}' );
 				case 'rate_limit':
 					return $reply( 451, '{"return":{"status":451,"message":"too many calls"}}' );
+				case 'undocumented':
+					return $reply( 499, '{"return":{"status":499,"message":"not in the provider table"}}' );
+				case 'garbage200':
+					return $reply( 200, 'this is not json' );
 				case 'echo':
 					return $reply( 411, wp_json_encode( array( 'return' => array( 'status' => 411, 'message' => 'receptor ' . $phone . ' invalid, key TESTKEY' ) ) ) );
 				case 'leaky':
 					return new WP_Error( 'http_request_failed', 'cURL error 28: Operation timed out after 20001 milliseconds with 0 bytes received for ' . $url . '?receptor=' . $phone );
+			}
+			if ( preg_match( '/^code_(\d+)$/', $mode, $mm ) ) {
+				return $reply( (int) $mm[1], '{"return":{"status":' . (int) $mm[1] . ',"message":"documented code ' . (int) $mm[1] . '"}}' );
+			}
+			if ( preg_match( '/^h200_(\d+)$/', $mode, $mm ) ) {
+				return $reply( 200, '{"return":{"status":' . (int) $mm[1] . ',"message":"http 200 with status ' . (int) $mm[1] . '"}}' );
 			}
 			return $reply( 200, '{"return":{"status":200,"message":"تایید شد"},"entries":[{"messageid":1}]}' );
 		}, 10, 3 );
