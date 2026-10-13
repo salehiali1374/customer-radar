@@ -95,7 +95,7 @@ coverage/
 *.cover
 
 # --- Generated artifacts and release packages ----------------------------------------------------
-# Release zips are rebuilt from source; publish them as GitHub Releases / on marketplace, not in git history.
+# Release zips are rebuilt from source; publish them as GitHub Releases, not in git history.
 dist/
 build/
 *.zip
@@ -107,6 +107,8 @@ build/
 
 # --- Dependencies (not installed in this project; never commit them if they appear) --------------
 node_modules/
+__pycache__/
+*.pyc
 vendor/
 bower_components/
 wp-content/uploads/

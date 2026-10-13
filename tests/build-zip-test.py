@@ -107,7 +107,7 @@ class BuildZip(unittest.TestCase):
     def test_nothing_that_must_stay_home_is_inside(self):
         for n in self.names():
             rel = n.split('/', 1)[1]
-            for bad in ('tests/', 'docs/', 'bin/', 'dist/', 'fixtures', '.git', '.env', 'wp-config', 'marketplace'):
+            for bad in ('tests/', 'docs/', 'bin/', 'dist/', 'fixtures', '.git', '.env', 'wp-config', 'listing'):
                 self.assertNotIn(bad, rel, n)
             self.assertFalse(rel.endswith(('.md', '.json', '.py', '.sh', '.zip', '.csv', '.sql', '.log')), n)
             self.assertTrue(n.startswith('customer-radar/'), n)

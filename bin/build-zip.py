@@ -5,7 +5,7 @@
     bin/build-zip.py --verify /path/customer-radar-<version>.zip  check an existing archive (build also verifies its own output)
 
 Only the files named below can ever enter the archive: anything else in the working tree (tests, fixtures, docs, .git, dist,
-local configuration, editor files, the marketplace listing draft) is simply never looked at. Source files are only READ.
+local configuration, editor files, listing drafts) is simply never looked at. Source files are only READ.
 
 The archive is reproducible: entries are sorted, permissions are fixed (files 0644), timestamps are fixed
 (SOURCE_DATE_EPOCH, default below), so building twice from the same tree gives the same bytes.
