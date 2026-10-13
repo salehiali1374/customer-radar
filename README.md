@@ -4,7 +4,9 @@ WooCommerce plugin (Persian / RTL, Jalali dates) that analyses customers with RF
 
 افزونه ووکامرس برای تحلیل RFM مشتریان، «فهرست تماس امروز» و کمپین پیامکی ایمن با گروه شاهد.
 
-![Dashboard](docs/screenshots/dashboard-top.png)
+![Customer Radar tour](docs/demo.gif)
+
+_Screenshots are from a demo shop with fake data._
 
 ## Features
 - Nine RFM customer segments, rebuilt nightly (and on demand)
